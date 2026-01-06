@@ -1,0 +1,9 @@
+{
+  "max_to_per_ca": 68,
+  "sv_khong_trung_ca": false,
+  "ctdt_khong_lien_ngay": false,
+  "solver_timeout": 120,
+  "num_workers": 10,
+  "ctdt_khong_trung_ngay": false,
+  "he_so_penalty_lien_ngay": 10
+}

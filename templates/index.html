@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="vi">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Xếp Lịch Thi - Hệ thống tự động</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">📅</span>
+                <h1>Xếp Lịch Thi</h1>
+            </div>
+            <p class="subtitle">Hệ thống xếp lịch thi tự động với OR-Tools</p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Step 1: Upload Files -->
+            <section class="card" id="upload-section">
+                <div class="card-header">
+                    <span class="step-badge">1</span>
+                    <h2>Tải lên dữ liệu</h2>
+                </div>
+                <div class="card-body">
+                    <div class="upload-grid">
+                        <!-- LHP File -->
+                        <div class="upload-item" data-type="lhp">
+                            <div class="upload-dropzone" id="drop-lhp">
+                                <div class="upload-icon">📋</div>
+                                <div class="upload-label">Danh sách LHP</div>
+                                <div class="upload-hint">danhsachLHP.xlsx</div>
+                                <div class="upload-status"></div>
+                                <input type="file" accept=".xlsx,.xls" hidden>
+                            </div>
+                        </div>
+
+                        <!-- Data File -->
+                        <div class="upload-item" data-type="data">
+                            <div class="upload-dropzone" id="drop-data">
+                                <div class="upload-icon">📊</div>
+                                <div class="upload-label">Data CTĐT</div>
+                                <div class="upload-hint">Data.xlsx</div>
+                                <div class="upload-status"></div>
+                                <input type="file" accept=".xlsx,.xls" hidden>
+                            </div>
+                        </div>
+
+                        <!-- Config File -->
+                        <div class="upload-item" data-type="cfg">
+                            <div class="upload-dropzone" id="drop-cfg">
+                                <div class="upload-icon">⚙️</div>
+                                <div class="upload-label">Cấu hình</div>
+                                <div class="upload-hint">cau_hinh.xlsx</div>
+                                <div class="upload-status"></div>
+                                <input type="file" accept=".xlsx,.xls" hidden>
+                            </div>
+                        </div>
+
+                        <!-- SV File -->
+                        <div class="upload-item" data-type="sv">
+                            <div class="upload-dropzone" id="drop-sv">
+                                <div class="upload-icon">👥</div>
+                                <div class="upload-label">Danh sách SV</div>
+                                <div class="upload-hint">danhsachSV.xlsx</div>
+                                <div class="upload-status"></div>
+                                <input type="file" accept=".xlsx,.xls" hidden>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 2: Configuration -->
+            <section class="card" id="config-section">
+                <div class="card-header">
+                    <span class="step-badge">2</span>
+                    <h2>Cấu hình ràng buộc</h2>
+                </div>
+                <div class="card-body">
+                    <div class="config-grid">
+                        <!-- Constraints -->
+                        <div class="config-group">
+                            <h3>Ràng buộc</h3>
+
+                            <div class="config-item">
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="cfg-sv-khong-trung" checked>
+                                    <span class="toggle-switch"></span>
+                                    <span class="toggle-text">Sinh viên không trùng ca thi</span>
+                                </label>
+                                <p class="config-desc">Đảm bảo mỗi sinh viên không phải thi 2 môn cùng một ca</p>
+                            </div>
+
+                            <div class="config-item">
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="cfg-ctdt-trung-ngay" checked>
+                                    <span class="toggle-switch"></span>
+                                    <span class="toggle-text">CTĐT/Khóa không thi cùng ngày</span>
+                                </label>
+                                <p class="config-desc">Một CTĐT/Khóa chỉ được thi tối đa 1 môn mỗi ngày (ràng buộc cứng)
+                                </p>
+                            </div>
+
+                            <div class="config-item">
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="cfg-ctdt-lien-ngay" checked>
+                                    <span class="toggle-switch"></span>
+                                    <span class="toggle-text">CTĐT/Khóa không thi liền ngày</span>
+                                </label>
+                                <p class="config-desc">Cố gắng tránh thi 2 ngày liên tiếp (ràng buộc mềm - penalty)</p>
+                            </div>
+                        </div>
+
+                        <!-- Parameters -->
+                        <div class="config-group">
+                            <h3>Tham số</h3>
+
+                            <div class="config-item">
+                                <label for="cfg-max-to">Số tổ thi tối đa mỗi ca</label>
+                                <input type="number" id="cfg-max-to" value="68" min="1" max="200">
+                                <p class="config-desc">Sẽ tự động cập nhật theo số phòng trong cau_hinh.xlsx</p>
+                            </div>
+
+                            <div class="config-item">
+                                <label for="cfg-penalty">Hệ số penalty thi liền ngày</label>
+                                <input type="number" id="cfg-penalty" value="10" min="1" max="100">
+                            </div>
+
+                            <div class="config-item">
+                                <label for="cfg-timeout">Timeout solver (giây)</label>
+                                <input type="number" id="cfg-timeout" value="120" min="10" max="600">
+                            </div>
+
+                            <div class="config-item">
+                                <label for="cfg-workers">Số worker song song</label>
+                                <input type="number" id="cfg-workers" value="8" min="1" max="32">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 3: Run Solver -->
+            <section class="card" id="solve-section">
+                <div class="card-header">
+                    <span class="step-badge">3</span>
+                    <h2>Chạy xếp lịch</h2>
+                </div>
+                <div class="card-body">
+                    <div class="solve-actions">
+                        <button class="btn btn-primary btn-large" id="btn-solve" disabled>
+                            <span class="btn-icon">🚀</span>
+                            <span class="btn-text">Bắt đầu xếp lịch</span>
+                        </button>
+                    </div>
+
+                    <!-- Progress -->
+                    <div class="progress-section" id="progress-section" style="display: none;">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progress-fill"></div>
+                        </div>
+                        <p class="progress-text" id="progress-text">Đang xử lý...</p>
+                    </div>
+
+                    <!-- Result -->
+                    <div class="result-section" id="result-section" style="display: none;">
+                        <div class="result-header">
+                            <span class="result-icon" id="result-icon">✅</span>
+                            <h3 class="result-title" id="result-title">Xếp lịch thành công!</h3>
+                        </div>
+
+                        <div class="result-stats" id="result-stats">
+                            <!-- Stats will be inserted here -->
+                        </div>
+
+                        <!-- Result Table -->
+                        <div class="result-table-container" id="result-table-container" style="display: none;">
+                            <div class="table-header">
+                                <h4>📋 Bảng lịch thi</h4>
+                                <span class="table-info" id="table-info"></span>
+                            </div>
+                            <div class="table-wrapper">
+                                <table class="result-table" id="result-table">
+                                    <thead>
+                                        <tr>
+                                            <th>STT</th>
+                                            <th>Mã HP</th>
+                                            <th>Tổ thi</th>
+                                            <th>Ngày thi</th>
+                                            <th>Ca</th>
+                                            <th>Phòng thi</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="result-table-body">
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="result-actions">
+                            <button class="btn btn-success" id="btn-download">
+                                <span class="btn-icon">📥</span>
+                                <span class="btn-text">Tải kết quả Excel</span>
+                            </button>
+                            <button class="btn btn-info" id="btn-download-sv" style="display: none;">
+                                <span class="btn-icon">👥</span>
+                                <span class="btn-text">Tải DS Sinh viên</span>
+                            </button>
+                            <button class="btn btn-secondary" id="btn-reset">
+                                <span class="btn-icon">🔄</span>
+                                <span class="btn-text">Xếp lịch lại</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Error -->
+                    <div class="error-section" id="error-section" style="display: none;">
+                        <div class="error-header">
+                            <span class="error-icon">❌</span>
+                            <h3 class="error-title">Không thể xếp lịch</h3>
+                        </div>
+                        <p class="error-message" id="error-message"></p>
+                        <p class="error-hint">💡 Thử tắt ràng buộc "CTĐT/Khóa không thi liền ngày" hoặc tăng số ngày
+                            thi.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Step 4: Visual Schedule Visualization -->
+            <section class="card" id="visual-section" style="display: none;">
+                <div class="card-header">
+                    <span class="step-badge">4</span>
+                    <h2>Xem & Chỉnh sửa Lịch trực quan</h2>
+                </div>
+                <div class="card-body">
+                    <div class="visual-controls" style="display: flex; align-items: center; margin-bottom: 15px;">
+                        <div class="control-group" style="margin-right: 15px;">
+                            <label for="visual-date-select" style="margin-right: 10px;"><strong>Ngày
+                                    thi:</strong></label>
+                            <select id="visual-date-select" class="form-control"
+                                style="display: inline-block; width: auto; min-width: 200px;">
+                                <option value="">-- Chọn ngày --</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" id="btn-refresh-visual">
+                            🔄 Refresh
+                        </button>
+                    </div>
+
+                    <div class="schedule-legend" style="margin: 15px 0;">
+                        <span class="legend-item"><span class="legend-color occupied"
+                                style="background:#e3f2fd; border:1px solid #2196f3; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Có
+                            môn thi</span>
+                        <span class="legend-item" style="margin-left:15px;"><span class="legend-color empty"
+                                style="background:#f5f5f5; border:1px solid #ddd; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Trống</span>
+                        <span class="legend-item" style="margin-left:15px;"><span class="legend-color selected"
+                                style="background:#fff3cd; border:1px solid #ffc107; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Đang
+                            chọn (Move/Swap)</span>
+                    </div>
+
+                    <div class="schedule-grid-wrapper" style="overflow-x: auto;">
+                        <div id="schedule-grid" class="schedule-grid">
+                            <!-- JS will render grid here -->
+                            <p class="text-center text-muted">Vui lòng chọn ngày để xem lịch.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Previous Results -->
+            <section class="card" id="history-section">
+                <div class="card-header">
+                    <span class="step-badge">📁</span>
+                    <h2>Lịch sử kết quả</h2>
+                </div>
+                <div class="card-body">
+                    <div class="results-list" id="results-list">
+                        <p class="no-results">Chưa có kết quả nào</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Powered by Google OR-Tools CP-SAT Solver</p>
+        </footer>
+    </div>
+
+    <script src="/static/app.js?v=1"></script>
+</body>
+
+</html>

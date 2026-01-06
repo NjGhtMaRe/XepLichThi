@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# Excel temp files
+~$*.xlsx
+~$*.xls
+
+# Results (có thể bỏ qua nếu không muốn track)
+# ket_qua_*.xlsx
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
