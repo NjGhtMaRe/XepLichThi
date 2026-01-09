@@ -21,12 +21,27 @@ df_lhp = pd.read_excel(path_lhp)
 df_data = pd.read_excel(path_data)
 df_cfg = pd.read_excel(path_cfg)
 
+# Chuẩn hóa MaHP trong df_lhp để khớp với df_sv
+df_lhp["MaHP"] = df_lhp["MaHP"].astype(str).str.strip()
+
 df_sv = pd.read_excel(path_sv)
 
 # Chuẩn hóa
 df_sv["MaSV"] = df_sv["MaSV"].astype(str).str.strip()
 df_sv["Ten"] = df_sv["Ten"].astype(str).str.strip()
 df_sv["MaHP"] = df_sv["MaHP"].astype(str).str.strip()
+
+# CRITICAL: Loại bỏ duplicate (MaSV, MaHP) để tránh sinh viên bị gán nhiều lần
+original_count = len(df_sv)
+df_sv = df_sv.drop_duplicates(subset=["MaSV", "MaHP"], keep="first")
+sv_after_dedup = len(df_sv)
+duplicates_removed = original_count - sv_after_dedup
+
+print(f"\n📊 DEBUG - DATAFLOW TRACKING:")
+print(f"   1. df_sv (raw from danhsachSV): {original_count} dòng")
+print(f"   2. df_sv (sau dedup MaSV+MaHP): {sv_after_dedup} dòng (bỏ {duplicates_removed} duplicates)")
+print(f"   3. Unique students: {df_sv['MaSV'].nunique()}")
+print(f"   4. Unique courses: {df_sv['MaHP'].nunique()}")
 
 df_hk = pd.read_excel(path_cfg, sheet_name="HK")
 df_thoigianthi = pd.read_excel(
@@ -57,6 +72,26 @@ df_phongthi = pd.read_excel(
 )
 
 df_phongthi.columns = df_phongthi.columns.str.strip()
+
+# Load PhongThiMay sheet for I-Test (machine-based exams)
+try:
+    df_phongthi_may = pd.read_excel(path_cfg, sheet_name="PhongThiMay")
+    df_phongthi_may.columns = df_phongthi_may.columns.str.strip()
+    ITEST_ENABLED = True
+    print(f"   ✅ Đã load PhongThiMay: {len(df_phongthi_may)} dòng")
+    print(f"      Columns: {list(df_phongthi_may.columns)}")
+    print(f"      Data preview:\n{df_phongthi_may.head()}")
+except Exception as e:
+    df_phongthi_may = pd.DataFrame()
+    ITEST_ENABLED = False
+    print(f"   ⚠️ Không tìm thấy sheet PhongThiMay, bỏ qua I-Test phase: {e}")
+
+# Debug: Check HinhThucThi in df_lhp
+if "HinhThucThi" in df_lhp.columns:
+    itest_count = len(df_lhp[df_lhp["HinhThucThi"] == 1])
+    print(f"   📊 df_lhp có cột HinhThucThi, {itest_count} môn có HinhThucThi=1")
+else:
+    print(f"   ⚠️ df_lhp KHÔNG có cột HinhThucThi. Columns: {list(df_lhp.columns)}")
 
 df_quytac = pd.read_excel(
     path_cfg,
@@ -257,7 +292,41 @@ PHONG_KHA_DUNG = (
 # Phân loại phòng theo loại (PH: Phòng Học, PM: Phòng Máy)
 PHONG_PH = [p for p in PHONG_KHA_DUNG if p.startswith("PH")]
 PHONG_PM = [p for p in PHONG_KHA_DUNG if p.startswith("PM")]
-print(f"\n📊 Phòng thi: {len(PHONG_PH)} phòng PH, {len(PHONG_PM)} phòng PM")
+
+# I-Test: Extract rooms and dates from PhongThiMay
+PHONG_ITEST = []
+NGAY_ITEST = []
+NGAY_ITEST_IDX = []  # Index for solver
+
+if ITEST_ENABLED and not df_phongthi_may.empty:
+    print(f"   🔍 PhongThiMay columns: {list(df_phongthi_may.columns)}")
+    
+    # Get I-Test rooms (try multiple column names)
+    phong_col = next((c for c in df_phongthi_may.columns if "PhongThi" in c or "Phong" in c), None)
+    if phong_col:
+        PHONG_ITEST = df_phongthi_may[phong_col].dropna().astype(str).str.strip().unique().tolist()
+        print(f"   ✅ Found PhongThi column: '{phong_col}'")
+    else:
+        print(f"   ⚠️ Không tìm thấy cột PhongThi!")
+    
+    # Get I-Test dates (try multiple column names)
+    ngay_col = next((c for c in df_phongthi_may.columns if "NgayThi" in c or "Ngay" in c), None)
+    if ngay_col:
+        NGAY_ITEST = df_phongthi_may[ngay_col].dropna().unique().tolist()
+        print(f"   ✅ Found NgayThi column: '{ngay_col}'")
+    else:
+        print(f"   ⚠️ Không tìm thấy cột NgayThi!")
+    
+    print(f"   📊 I-Test: {len(PHONG_ITEST)} phòng, {len(NGAY_ITEST)} ngày")
+    print(f"      Phòng I-Test: {PHONG_ITEST}")
+    print(f"      Ngày I-Test: {NGAY_ITEST}")
+    
+    # CRITICAL: Exclude I-Test rooms from main room pools
+    PHONG_PH = [p for p in PHONG_PH if p not in PHONG_ITEST]
+    PHONG_PM = [p for p in PHONG_PM if p not in PHONG_ITEST]
+    print(f"   ⚠️ Đã loại bỏ phòng I-Test khỏi phòng thi thường. PH còn: {len(PHONG_PH)}, PM còn: {len(PHONG_PM)}")
+
+print(f"\n📊 Phòng thi (sau loại I-Test): {len(PHONG_PH)} phòng PH, {len(PHONG_PM)} phòng PM")
 
 # Sức chứa phòng thi
 SUC_CHUA_PHONG = dict(
@@ -273,6 +342,42 @@ for phong in PHONG_KHA_DUNG:
 
 NGAY = list(range(1, len(ngay_thi) + 1))
 map_ngay = dict(zip(NGAY, ngay_thi))
+
+# Map I-Test dates to indices
+if NGAY_ITEST:
+    print(f"   🔍 Debug - NGAY_ITEST: {NGAY_ITEST}")
+    print(f"   🔍 Debug - NGAY_ITEST types: {[type(d).__name__ for d in NGAY_ITEST]}")
+    print(f"   🔍 Debug - map_ngay values: {list(map_ngay.values())[:5]}")
+    print(f"   🔍 Debug - map_ngay types: {[type(d).__name__ for d in list(map_ngay.values())[:3]]}")
+    
+    for itest_date in NGAY_ITEST:
+        matched = False
+        for idx, regular_date in map_ngay.items():
+            # Normalize both dates to comparable format
+            try:
+                itest_dt = pd.to_datetime(itest_date)
+                regular_dt = pd.to_datetime(regular_date)
+                
+                # Compare dates only (ignore time)
+                if itest_dt.date() == regular_dt.date():
+                    NGAY_ITEST_IDX.append(idx)
+                    print(f"      ✅ Matched: {itest_date} ({itest_dt.date()}) -> index {idx}")
+                    matched = True
+                    break
+            except Exception as ex:
+                # Fallback to string comparison
+                if str(itest_date) == str(regular_date):
+                    NGAY_ITEST_IDX.append(idx)
+                    print(f"      ✅ Matched (str): {itest_date} -> index {idx}")
+                    matched = True
+                    break
+        
+        if not matched:
+            print(f"      ❌ No match for: {itest_date} (type: {type(itest_date).__name__})")
+    
+    print(f"   📊 I-Test ngày index: {NGAY_ITEST_IDX}")
+    if not NGAY_ITEST_IDX:
+        print(f"   ⚠️ WARNING: No I-Test dates matched! Phase 0 will be skipped.")
 
 # ======================
 # 11. Danh sách ca thi
@@ -291,6 +396,10 @@ phong_theo_mon = (
     .set_index("MaHP")[["ToThi", "PhongThi"]]
     .to_dict("index")
 )
+
+# DEBUG: Track total ToThi from input
+total_tothi_input = sum(info["ToThi"] for info in phong_theo_mon.values())
+print(f"\n📊 DEBUG - phong_theo_mon: {len(phong_theo_mon)} môn, Tổng ToThi: {total_tothi_input}")
 
 # ======================
 # 13. CTĐT + Khóa - Danh sách môn thi
@@ -375,9 +484,51 @@ mon_sv = (
 # ======================
 ds_sv_to_thi = []
 
+# DEBUG: Track skipped students/courses
+skipped_courses = []
+skipped_students = 0
+
+# DEBUG: Compare courses between df_sv and phong_theo_mon
+sv_courses = set(df_sv["MaHP"].unique())
+lhp_courses = set(phong_theo_mon.keys())
+courses_only_in_sv = sv_courses - lhp_courses
+courses_only_in_lhp = lhp_courses - sv_courses
+common_courses = sv_courses & lhp_courses
+
+print(f"\n📊 DEBUG - COURSE COMPARISON:")
+print(f"   Courses in df_sv: {len(sv_courses)}")
+print(f"   Courses in phong_theo_mon (df_lhp): {len(lhp_courses)}")
+print(f"   Common courses: {len(common_courses)}")
+print(f"   Courses ONLY in df_sv (will be skipped): {len(courses_only_in_sv)}")
+print(f"   Courses ONLY in df_lhp (no students): {len(courses_only_in_lhp)}")
+
+# Expected SLSV check
+if "SLSV" in df_lhp.columns:
+    expected_slsv = df_lhp["SLSV"].sum()
+    print(f"   Expected SLSV (from df_lhp.SLSV): {expected_slsv}")
+    
+    # Breakdown by common vs missing courses
+    df_lhp_common = df_lhp[df_lhp["MaHP"].isin(common_courses)]
+    df_lhp_missing = df_lhp[df_lhp["MaHP"].isin(courses_only_in_lhp)]
+    
+    slsv_common = df_lhp_common["SLSV"].sum()
+    slsv_missing = df_lhp_missing["SLSV"].sum()
+    
+    print(f"\n📊 DEBUG - SLSV BREAKDOWN:")
+    print(f"   SLSV from common courses (có SV data): {slsv_common}")
+    print(f"   SLSV from missing courses (KHÔNG có SV data): {slsv_missing}")
+    print(f"   Total check: {slsv_common + slsv_missing} (should = {expected_slsv})")
+    
+    if slsv_missing > 0:
+        print(f"\n⚠️ CÁC MÔN THIẾU SINH VIÊN (trong df_lhp nhưng không có trong df_sv):")
+        missing_detail = df_lhp_missing[["MaHP", "SLSV", "ToThi"]].drop_duplicates().head(22)
+        print(missing_detail.to_string())
+
 for mahp, df_mhp in df_sv.groupby("MaHP"):
     # Chỉ xử lý môn có trong danh sách thi
     if mahp not in phong_theo_mon:
+        skipped_courses.append(mahp)
+        skipped_students += len(df_mhp)
         continue
 
     so_to = int(phong_theo_mon[mahp]["ToThi"])
@@ -419,6 +570,17 @@ for mahp, df_mhp in df_sv.groupby("MaHP"):
 # ======================
 df_sv_to_thi = pd.DataFrame(ds_sv_to_thi)
 print(df_sv_to_thi)
+
+# DEBUG: Report skipped data
+print(f"\n📊 DEBUG - STUDENT DISTRIBUTION RESULT:")
+print(f"   df_sv_to_thi: {len(df_sv_to_thi)} dòng (MaSV + MaHP + ToThi)")
+print(f"   Unique SV được rải: {df_sv_to_thi['MaSV'].nunique() if len(df_sv_to_thi) > 0 else 0}")
+
+if skipped_courses:
+    print(f"\n⚠️ DEBUG - SV BỊ BỎ QUA (môn không có trong danh sách thi):")
+    print(f"   Số môn bị bỏ: {len(skipped_courses)}")
+    print(f"   Số SV-lượt bị bỏ: {skipped_students}")
+    print(f"   Môn bị bỏ (top 10): {skipped_courses[:10]}")
 
 # ======================
 # 3.1. SV -> danh sách môn thi
@@ -516,12 +678,15 @@ def run_solver_phase(
     time_limit=60,
     relax_same_day=False,  # Nếu True: chuyển ràng buộc "trùng ngày" từ HARD sang SOFT
     restricted_days=None,  # List[int]: Danh sách các ngày cho phép xếp lịch
-    prioritize_early=True  # Nếu True: Ưu tiên xếp vào các ngày đầu
+    prioritize_early=True,  # Nếu True: Ưu tiên xếp vào các ngày đầu
+    distribute_uniformly=False, # Nếu True: Cố gắng rải đều (Min-Max)
+    max_to_per_slot=None  # Số tổ thi tối đa mỗi slot (None = dùng PHONG_KHA_DUNG)
 ):
     """
     Hàm chạy solver cho một tập các môn.
     - restricted_days: Chỉ xếp môn vào các ngày trong list này (cho Phase 2)
     - prioritize_early: Có ưu tiên xếp sớm hay không (False cho Phase 3 để rải đều)
+    - distribute_uniformly: Thêm hàm mục tiêu để cân bằng tải giữa các ngày và các ca
     """
     print(f"\n🚀 Đang chạy {phase_name}...")
     print(f"   - Số môn cần xếp: {len(ds_mon_to_schedule)}")
@@ -531,7 +696,7 @@ def run_solver_phase(
         print(f"   - Giới hạn xếp trong {len(restricted_days)} ngày đầu: {restricted_days}")
     
     # DEBUG: Tính capacity
-    MAX_TO_PER_CA = len(PHONG_KHA_DUNG)
+    MAX_TO_PER_CA = max_to_per_slot if max_to_per_slot else len(PHONG_KHA_DUNG)
     total_to_thi = sum(phong_theo_mon[m]["ToThi"] for m in ds_mon_to_schedule if m in phong_theo_mon)
     max_capacity = len(DAYS) * len(CA) * MAX_TO_PER_CA
     print(f"   📊 DEBUG - Tổng tổ thi: {total_to_thi}, Capacity tối đa: {max_capacity} ({len(DAYS)} ngày x {len(CA)} ca x {MAX_TO_PER_CA} phòng)")
@@ -661,8 +826,8 @@ def run_solver_phase(
                 model.Add(day_d2 >= day_d1 + MIN_GAP_SPLIT)
 
     # 4. Ràng buộc sinh viên không trùng ca
-    # Nếu relax_same_day=True -> Soft Constraint (penalty cho vi phạm)
-    # Nếu relax_same_day=False -> Hard Constraint (cấm tuyệt đối)
+    # Phase 1/2 (relax_same_day=False): HARD CONSTRAINT
+    # Phase 3 (relax_same_day=True): SOFT với penalty CỰC CAO
     ds_mon_set = set(ds_mon_to_schedule)
     penalty_sv_trung_ca = []
     
@@ -675,13 +840,32 @@ def run_solver_phase(
                 sum_sv = sum(z[(mahp, d, c)] for mahp in mon_list_filtered)
                 
                 if relax_same_day:
-                    # SOFT CONSTRAINT
+                    # SOFT CONSTRAINT for Phase 3 - với hệ số cực cao
                     vi_pham_sv = model.NewIntVar(0, len(mon_list_filtered), f"vpsv_{masv}_{d}_{c}")
                     model.Add(vi_pham_sv >= sum_sv - 1)
                     penalty_sv_trung_ca.append(vi_pham_sv)
                 else:
-                    # HARD CONSTRAINT
+                    # HARD CONSTRAINT for Phase 1/2
                     model.Add(sum_sv <= 1)
+
+    # 4b. Penalty cho sinh viên thi NHIỀU MÔN CÙNG NGÀY (khác ca) - SOFT CONSTRAINT
+    # Đây là ràng buộc mới để hạn chế tối đa SV phải thi nhiều môn trong 1 ngày
+    penalty_sv_trung_ngay = []
+    
+    for masv, mon_list in sv_to_mon.items():
+        mon_list_filtered = [m for m in mon_list if m in ds_mon_set]
+        if len(mon_list_filtered) <= 1:
+            continue
+        
+        for d in DAYS:
+            # Đếm số môn SV này thi trong ngày d (bất kể ca nào)
+            sum_sv_ngay = sum(z[(mahp, d, c)] for mahp in mon_list_filtered for c in CA)
+            
+            # Nếu SV thi > 1 môn trong ngày d -> phạt
+            # vi_pham = max(0, sum - 1) = số môn vượt quá 1
+            vi_pham_ngay = model.NewIntVar(0, len(mon_list_filtered), f"vpsvngay_{masv}_{d}")
+            model.Add(vi_pham_ngay >= sum_sv_ngay - 1)
+            penalty_sv_trung_ngay.append(vi_pham_ngay)
 
     # 5. Ràng buộc CTĐT-Khóa không thi cùng ngày
     # Nếu relax_same_day=True -> Soft Constraint (penalty)
@@ -758,11 +942,16 @@ def run_solver_phase(
     for pen in penalty_sv_trung_ca:
         total_objective.append(HE_SO_SV_TRUNG_CA * pen)
     
-    # 0b. Phạt vi phạm trùng ngày (CHỈ KHI relax_same_day=True)
-    # Hệ số cực lớn để hạn chế tối đa
+    # 0b. Phạt vi phạm CTDT-Khoa trùng ngày (CHỈ KHI relax_same_day=True)
     HE_SO_TRUNG_NGAY = 10000000
     for pen in penalty_trung_ngay:
         total_objective.append(HE_SO_TRUNG_NGAY * pen)
+    
+    # 0c. Phạt sinh viên thi NHIỀU MÔN CÙNG NGÀY (khác ca) - LUÔN ÁP DỤNG
+    # Hệ số cao để hạn chế tối đa SV phải thi nhiều môn trong 1 ngày
+    HE_SO_SV_TRUNG_NGAY = 5000000  # Cao nhưng thấp hơn trùng ca
+    for pen in penalty_sv_trung_ngay:
+        total_objective.append(HE_SO_SV_TRUNG_NGAY * pen)
     
     # 1. Tránh thi liền ngày (hệ số cao)
     HE_SO_LIEN_NGAY = 1000000
@@ -780,10 +969,42 @@ def run_solver_phase(
                     total_objective.append(z[(mahp, d, c)] * d * so_to * 1)
     
     # 3. Ưu tiên ca sớm (hệ số 0.1)
-    for mahp in ds_mon_to_schedule:
+    # CHỈ KHI KHÔNG RẢI ĐỀU (nếu rải đều thì ta không muốn dồn vào ca đầu)
+    if not distribute_uniformly:
+        for mahp in ds_mon_to_schedule:
+            for d in DAYS:
+                for c in CA:
+                    total_objective.append(z[(mahp, d, c)] * c * 0.1)
+    
+    # 4. CÂN BẰNG TẢI (RẢI ĐỀU) - CHỈ KHI distribute_uniformly=True
+    if distribute_uniformly:
+        print("   ⚖️ Đang áp dụng cân bằng tải (Distribute Uniformly)...")
+        
+        # 4.1 Cân bằng số lượng môn thi mỗi ngày (Minimize Max Exams Per Day)
+        daily_counts = []
         for d in DAYS:
-            for c in CA:
-                total_objective.append(z[(mahp, d, c)] * c * 0.1)
+            # Đếm số môn thi trong ngày d
+            count = sum(z[(mahp, d, c)] for mahp in ds_mon_to_schedule for c in CA)
+            daily_counts.append(count)
+        
+        # Biến Max exams/day
+        max_exams_per_day = model.NewIntVar(0, len(ds_mon_to_schedule), "max_exams_per_day")
+        model.AddMaxEquality(max_exams_per_day, daily_counts)
+        
+        # Hàm mục tiêu: Minimize Max
+        total_objective.append(max_exams_per_day * 5000)
+        
+        # 4.2 Cân bằng số lượng môn thi mỗi loại ca (Minimize Max Exams Per Shift ID)
+        # Giúp tránh việc dồn hết vào Ca 1 của tất cả các ngày
+        shift_counts = []
+        for c in CA:
+            count = sum(z[(mahp, d, c)] for mahp in ds_mon_to_schedule for d in DAYS)
+            shift_counts.append(count)
+            
+        max_exams_per_shift = model.NewIntVar(0, len(ds_mon_to_schedule), "max_exams_per_shift")
+        model.AddMaxEquality(max_exams_per_shift, shift_counts)
+        
+        total_objective.append(max_exams_per_shift * 2000)
 
     model.Minimize(sum(total_objective))
 
@@ -816,9 +1037,24 @@ def run_solver_phase(
 NGUONG_CHIA_TO = 25  # Nếu ToThi > 25, chia làm 2 ngày
 split_courses = {}  # {MaHP_gốc: [(MaHP_D1, ToThi_D1), (MaHP_D2, ToThi_D2)]}
 
+# IMPORTANT: Detect I-Test courses BEFORE splitting to exclude them
+# I-Test uses multi-slot scheduling, so shouldn't be split into D1/D2
+itest_mahps_before_split = set()
+if ITEST_ENABLED and "HinhThucThi" in df_lhp.columns:
+    df_lhp_itest_check = df_lhp[df_lhp["HinhThucThi"] == 1]
+    itest_mahps_before_split = set(df_lhp_itest_check["MaHP"].dropna().astype(str).str.strip().tolist())
+    print(f"   🖥️ I-Test courses (excluded from split): {len(itest_mahps_before_split)}")
+
 print("\n📊 KIỂM TRA MÔN CÓ TỔ THI LỚN (> 25):")
 for mahp, info in list(phong_theo_mon.items()):  # Dùng list() để tránh lỗi khi thay đổi dict
     to_thi = info["ToThi"]
+    
+    # Skip I-Test courses - they use multi-slot scheduling, not D1/D2 split
+    if mahp in itest_mahps_before_split:
+        if to_thi > NGUONG_CHIA_TO:
+            print(f"   ⏭️ {mahp}: {to_thi} tổ (I-Test - không chia)")
+        continue
+    
     if to_thi > NGUONG_CHIA_TO:
         # Chia làm 2
         to_d1 = to_thi // 2
@@ -852,6 +1088,16 @@ def replace_split_courses(mon_list, split_courses):
         else:
             result.append(m)
     return result
+
+# CRITICAL FIX: Update sv_to_mon with split codes
+# Without this, student constraints won't apply to split courses!
+# Note: ctdt_khoa_to_mon is defined inside run_solver_phase, not here
+if split_courses:
+    print("   Updating sv_to_mon with split course codes...")
+    new_sv_to_mon = {}
+    for masv, mon_list in sv_to_mon.items():
+        new_sv_to_mon[masv] = replace_split_courses(mon_list, split_courses)
+    sv_to_mon = new_sv_to_mon
 
 # ======================
 # CHUẨN BỊ 3 PHASE
@@ -891,7 +1137,20 @@ except Exception as e:
     print(f"⚠️ Info: Không áp dụng Phase 2 (Lý do: {e})")
 
 # 2. Phân loại môn
-ds_mon_phase1 = list_mon_chung["MaHP"].tolist()
+
+# 2a. I-Test courses (HinhThucThi = 1)
+ds_mon_itest = []
+if ITEST_ENABLED and "HinhThucThi" in df_lhp.columns:
+    df_lhp_itest = df_lhp[df_lhp["HinhThucThi"] == 1]
+    ds_mon_itest = df_lhp_itest["MaHP"].dropna().astype(str).str.strip().tolist()
+    # Only keep I-Test courses that are in our exam list
+    ds_mon_itest = [m for m in ds_mon_itest if m in phong_theo_mon]
+    print(f"   📊 I-Test courses: {len(ds_mon_itest)} môn")
+    if ds_mon_itest:
+        print(f"      {ds_mon_itest[:10]}{'...' if len(ds_mon_itest) > 10 else ''}")
+
+# 2b. Phase 1: Common courses (excluding I-Test)
+ds_mon_phase1 = [m for m in list_mon_chung["MaHP"].tolist() if m not in ds_mon_itest]
 ds_mon_phase2_all = []
 max_days_phase2 = 5 # fallback
 
@@ -910,14 +1169,15 @@ if phase2_priority:
             if mon_list_str:
                 mon_list = [m.strip() for m in mon_list_str.split(",")]
                 for m in mon_list:
-                    # Chỉ lấy môn KHÔNG phải môn chung
-                    if m not in ds_mon_phase1:
+                    # Chỉ lấy môn KHÔNG phải môn chung VÀ không phải I-Test
+                    if m not in ds_mon_phase1 and m not in ds_mon_itest:
                         ds_mon_phase2_all.append(m)
 
 ds_mon_phase2 = sorted(list(set(ds_mon_phase2_all)))
-ds_toan_bo_mon = df_mon["MaHP"].tolist()
+ds_toan_bo_mon = [m for m in df_mon["MaHP"].tolist() if m not in ds_mon_itest]
 
 # Thay thế môn gốc bằng môn chia trong các danh sách
+# NOTE: ds_mon_itest is NOT processed here - I-Test uses multi-slot scheduling, not D1/D2
 if split_courses:
     ds_mon_phase1 = replace_split_courses(ds_mon_phase1, split_courses)
     ds_mon_phase2 = replace_split_courses(ds_mon_phase2, split_courses)
@@ -925,19 +1185,106 @@ if split_courses:
     print(f"   Đã thay thế môn chia trong danh sách. Tổng môn mới: {len(ds_toan_bo_mon)}")
 
 print(f"\n📊 KẾ HOẠCH XẾP LỊCH:")
+if ds_mon_itest:
+    print(f"   - Phase 0 (I-Test)   : {len(ds_mon_itest)} môn")
 print(f"   - Phase 1 (Môn chung): {len(ds_mon_phase1)} môn")
 print(f"   - Phase 2 (Ưu tiên)  : {len(ds_mon_phase2)} môn (Max {max_days_phase2} ngày)")
 print(f"   - Phase 3 (Toàn bộ)  : {len(ds_toan_bo_mon)} môn")
 
 # ======================
+# RUN PHASE 0 - I-TEST (if enabled)
+# ======================
+schedule_itest = {}
+
+# DEBUG: Print why Phase 0 might be skipped
+print(f"\n🔍 DEBUG Phase 0 Condition Check:")
+print(f"   ds_mon_itest: {len(ds_mon_itest) if ds_mon_itest else 0} môn -> {'OK' if ds_mon_itest else 'EMPTY!'}")
+print(f"   NGAY_ITEST_IDX: {NGAY_ITEST_IDX if NGAY_ITEST_IDX else 'EMPTY!'}")
+print(f"   Condition (ds_mon_itest and NGAY_ITEST_IDX): {bool(ds_mon_itest and NGAY_ITEST_IDX)}")
+
+if ds_mon_itest and NGAY_ITEST_IDX:
+    print(f"\n🖥️ PHASE 0 - I-TEST SCHEDULING (Direct Assignment)")
+    print(f"   Môn I-Test: {len(ds_mon_itest)}")
+    print(f"   Ngày cho phép: {NGAY_ITEST_IDX}")
+    print(f"   Phòng I-Test: {PHONG_ITEST} ({len(PHONG_ITEST)} phòng)")
+    
+    # Direct scheduling for I-Test: distribute ToThi across slots
+    # Each slot can hold len(PHONG_ITEST) ToThi
+    rooms_per_slot = len(PHONG_ITEST) if PHONG_ITEST else 1
+    
+    # Calculate total ToThi needed
+    itest_tothi = []
+    for mahp in ds_mon_itest:
+        if mahp in phong_theo_mon:
+            to_count = int(phong_theo_mon[mahp]["ToThi"])
+            itest_tothi.append((mahp, to_count))
+    
+    total_tothi = sum(t[1] for t in itest_tothi)
+    slots_needed = (total_tothi + rooms_per_slot - 1) // rooms_per_slot  # Ceiling division
+    slots_available = len(NGAY_ITEST_IDX) * len(CA)
+    
+    print(f"   📊 Total ToThi: {total_tothi}, Slots needed: {slots_needed}, Slots available: {slots_available}")
+    
+    if slots_needed > slots_available:
+        print(f"   ⚠️ CẢNH BÁO: Không đủ slot cho I-Test! Cần {slots_needed} nhưng chỉ có {slots_available}")
+    
+    # Create list of available slots [(day, ca), ...]
+    itest_slots = [(d, c) for d in NGAY_ITEST_IDX for c in CA]
+    
+    # Assign each course to slots based on how many ToThi it has
+    # schedule_itest will be {mahp: [(d1, c1), (d2, c2), ...]} for multi-slot courses
+    schedule_itest_multi = {}  # {mahp: [(d, c), ...]} - can have multiple slots per course
+    slot_idx = 0
+    current_slot_used = 0
+    
+    for mahp, to_count in itest_tothi:
+        schedule_itest_multi[mahp] = []
+        remaining_to = to_count
+        
+        while remaining_to > 0:
+            if slot_idx >= len(itest_slots):
+                print(f"   ❌ Hết slot cho môn {mahp}!")
+                break
+            
+            current_slot = itest_slots[slot_idx]
+            can_fit = min(remaining_to, rooms_per_slot - current_slot_used)
+            
+            if can_fit > 0:
+                schedule_itest_multi[mahp].append((current_slot[0], current_slot[1], can_fit))  # (day, ca, num_to)
+                remaining_to -= can_fit
+                current_slot_used += can_fit
+            
+            # Move to next slot if current is full
+            if current_slot_used >= rooms_per_slot:
+                slot_idx += 1
+                current_slot_used = 0
+    
+    # Convert to regular schedule format (for compatibility with later phases)
+    # For multi-slot courses, we'll use the first slot as the "representative"
+    for mahp, slots in schedule_itest_multi.items():
+        if slots:
+            # Use first slot as representative
+            schedule_itest[mahp] = (slots[0][0], slots[0][1])
+    
+    print(f"   ✅ I-Test: {len(schedule_itest)} môn đã xếp lịch")
+    for mahp, slots in schedule_itest_multi.items():
+        print(f"      {mahp}: {[(f'D{d}C{c}x{n}') for d, c, n in slots]}")
+
+# ======================
 # RUN PHASE 1
 # ======================
+# Loại bỏ ngày đầu tiên (dành cho I-Test)
+NGAY_PHASE_123 = [d for d in NGAY if d > 1]  # Từ ngày thứ 2 trở đi
+print(f"\n📊 Phase 1-3 sẽ xếp vào các ngày: {NGAY_PHASE_123} (loại bỏ ngày đầu)")
+
 schedule_phase1 = run_solver_phase(
     "PHASE 1 - Môn Chung", 
     ds_mon_phase1, 
-    fixed_schedule=None, 
+    fixed_schedule=schedule_itest,  # Pass I-Test schedule as fixed
     time_limit=60,
-    prioritize_early=True
+    restricted_days=NGAY_PHASE_123,  # Loại bỏ ngày đầu
+    prioritize_early=False,
+    distribute_uniformly=True # Rải đều ngay từ môn chung
 )
 
 if schedule_phase1 is None:
@@ -964,14 +1311,15 @@ schedule_phase2 = schedule_phase1.copy()
 schedule_p2_result = {}
 
 if ds_mon_phase2:
-    restricted_days = DAYS[:max_days_phase2]
+    # Loại bỏ ngày đầu, chỉ dùng các ngày 2 -> max_days_phase2+1
+    restricted_days_p2 = [d for d in NGAY_PHASE_123 if d <= max_days_phase2 + 1]
     
     schedule_p2_result = run_solver_phase(
         "PHASE 2 - Môn Ưu Tiên",
         ds_mon_phase2,
         fixed_schedule=schedule_phase1,
         time_limit=60,
-        restricted_days=restricted_days,
+        restricted_days=restricted_days_p2,  # Loại bỏ ngày đầu
         prioritize_early=True,
         relax_same_day=True  # Cho phép vi phạm "cùng ngày" để đảm bảo có nghiệm
     )
@@ -992,8 +1340,10 @@ schedule_final = run_solver_phase(
     ds_toan_bo_mon,
     fixed_schedule=final_schedule_input,
     time_limit=300,
+    restricted_days=NGAY_PHASE_123,  # Loại bỏ ngày đầu
     relax_same_day=True,
-    prioritize_early=False # QUAN TRỌNG: Tắt ưu tiên sớm để rải đều
+    prioritize_early=False, # QUAN TRỌNG: Tắt ưu tiên sớm để rải đều
+    distribute_uniformly=True # Bật chế độ cân bằng tải
 )
 
 if not schedule_final:
@@ -1004,6 +1354,12 @@ if not schedule_final:
 # XỬ LÝ KẾT QUẢ CUỐNG CÙNG
 # ======================
 
+# CRITICAL: Merge schedule_itest into schedule_final
+if schedule_itest:
+    print(f"\n📊 Merging {len(schedule_itest)} I-Test courses into final schedule")
+    schedule_final.update(schedule_itest)
+    print(f"   Final schedule total: {len(schedule_final)} courses")
+
 # 1. Thu thập kết quả theo slot để gán phòng
 slot_assignments = {}  # {(ngay, ca): [(MaHP, ToThi), ...]}
 
@@ -1013,7 +1369,37 @@ for mahp_goc, split_list in split_courses.items():
     for mahp_split, _ in split_list:
         split_to_original[mahp_split] = mahp_goc
 
+# 1a. XỬ LÝ I-TEST RIÊNG (nếu có schedule_itest_multi)
+if 'schedule_itest_multi' in dir() and schedule_itest_multi:
+    print(f"\n📊 Processing I-Test ToThi assignments...")
+    itest_to_offset = {}  # Track ToThi offset per course
+    
+    for mahp, slots in schedule_itest_multi.items():
+        mahp_output = split_to_original.get(mahp, mahp)
+        to_offset = itest_to_offset.get(mahp, 0)
+        
+        for d, c, num_to in slots:
+            ngay = map_ngay[d]
+            if (ngay, c) not in slot_assignments:
+                slot_assignments[(ngay, c)] = []
+            
+            # Add each ToThi individually
+            for i in range(num_to):
+                to_offset += 1
+                slot_assignments[(ngay, c)].append((mahp_output, mahp, to_offset))
+        
+        itest_to_offset[mahp] = to_offset
+    
+    print(f"   ✅ Added I-Test ToThi to slot_assignments")
+
+# 1b. XỬ LÝ CÁC MÔN THƯỜNG (từ schedule_final, excluding I-Test)
+ds_mon_itest_set = set(ds_mon_itest) if ds_mon_itest else set()
+
 for mahp, (d, c) in schedule_final.items():
+    # Skip I-Test courses (already handled above)
+    if mahp in ds_mon_itest_set:
+        continue
+    
     ngay = map_ngay[d]
     if (ngay, c) not in slot_assignments:
         slot_assignments[(ngay, c)] = []
@@ -1023,21 +1409,61 @@ for mahp, (d, c) in schedule_final.items():
     
     # Thêm từng tổ thi của môn đó
     so_to = int(phong_theo_mon[mahp]["ToThi"])
+    
+    # Tính offset cho các môn bị chia (D2 phải tiếp nối D1)
+    start_offset = 0
+    if mahp in split_to_original and mahp_output in split_courses:
+        for m_split, t_split in split_courses[mahp_output]:
+            if m_split == mahp:
+                break
+            start_offset += t_split
+            
     for to in range(1, so_to + 1):
-        slot_assignments[(ngay, c)].append((mahp_output, mahp, to))  # (MaHP_output, MaHP_internal, ToThi)
+        actual_to = to + start_offset
+        slot_assignments[(ngay, c)].append((mahp_output, mahp, actual_to))  # (MaHP_output, MaHP_internal, ToThi)
 
-# 2. Gán phòng thi theo loại phòng (PH/PM)
+# 2. Gán phòng thi theo loại phòng (PH/PM/ITEST)
 final_records = []
+
+# Create set of I-Test course codes for lookup
+ds_mon_itest_set = set(ds_mon_itest) if ds_mon_itest else set()
 
 # Nhóm tổ thi theo loại phòng trong mỗi slot
 for (ngay, ca), to_list in slot_assignments.items():
     # Tách theo loại phòng (dùng mahp_internal để tra cứu loại phòng)
-    to_list_ph = [(mahp_out, mahp_int, to) for mahp_out, mahp_int, to in to_list if phong_theo_mon.get(mahp_int, {}).get("PhongThi", "PH") == "PH"]
-    to_list_pm = [(mahp_out, mahp_int, to) for mahp_out, mahp_int, to in to_list if phong_theo_mon.get(mahp_int, {}).get("PhongThi", "PH") == "PM"]
+    # I-Test courses get assigned to PHONG_ITEST
+    to_list_itest = [(mahp_out, mahp_int, to) for mahp_out, mahp_int, to in to_list if mahp_int in ds_mon_itest_set]
+    to_list_ph = [(mahp_out, mahp_int, to) for mahp_out, mahp_int, to in to_list if mahp_int not in ds_mon_itest_set and phong_theo_mon.get(mahp_int, {}).get("PhongThi", "PH") == "PH"]
+    to_list_pm = [(mahp_out, mahp_int, to) for mahp_out, mahp_int, to in to_list if mahp_int not in ds_mon_itest_set and phong_theo_mon.get(mahp_int, {}).get("PhongThi", "PH") == "PM"]
     
     # Sắp xếp để cố định thứ tự gán
+    to_list_itest.sort(key=lambda x: (x[0], x[2]))
     to_list_ph.sort(key=lambda x: (x[0], x[2]))
     to_list_pm.sort(key=lambda x: (x[0], x[2]))
+    
+    # Gán phòng I-Test cho môn I-Test
+    # KIỂM TRA: Số tổ thi I-Test không được vượt quá số phòng I-Test
+    if len(to_list_itest) > len(PHONG_ITEST) and PHONG_ITEST:
+        print(f"   ⚠️ CẢNH BÁO: {len(to_list_itest)} tổ I-Test nhưng chỉ có {len(PHONG_ITEST)} phòng I-Test cho slot {ngay} ca {ca}")
+    
+    for idx, (mahp_out, mahp_int, to) in enumerate(to_list_itest):
+        if PHONG_ITEST:
+            if idx < len(PHONG_ITEST):
+                phong = PHONG_ITEST[idx]  # Gán 1-1
+            else:
+                # Nếu hết phòng, gán vào phòng cuối cùng (với cảnh báo)
+                phong = PHONG_ITEST[-1]
+                print(f"      ⚠️ Tổ thi {mahp_out}-{to} phải dùng chung phòng {phong}")
+        else:
+            phong = PHONG_PM[idx % len(PHONG_PM)] if PHONG_PM else PHONG_KHA_DUNG[idx % len(PHONG_KHA_DUNG)]
+        
+        final_records.append({
+            "MaHP": mahp_out,
+            "ToThi": to,
+            "Ngay": ngay,
+            "Ca": ca,
+            "PhongThi": phong
+        })
     
     # Gán phòng PH cho môn PH
     for idx, (mahp_out, mahp_int, to) in enumerate(to_list_ph):
@@ -1074,7 +1500,29 @@ df_kq = pd.DataFrame(final_records)
 # Sắp xếp đẹp
 df_kq["Ngay"] = pd.to_datetime(df_kq["Ngay"])
 df_kq = df_kq.sort_values(["Ngay", "Ca", "PhongThi"])
+
+# Thêm cột Thứ (ngày trong tuần)
+THU_VIET = {
+    0: "Thứ hai",
+    1: "Thứ ba", 
+    2: "Thứ tư",
+    3: "Thứ năm",
+    4: "Thứ sáu",
+    5: "Thứ bảy",
+    6: "Chủ nhật"
+}
+df_kq["Thu"] = df_kq["Ngay"].dt.dayofweek.map(THU_VIET)
+
+# Format ngày sau khi tính Thứ
 df_kq["Ngay"] = df_kq["Ngay"].dt.strftime('%d/%m/%Y')
+
+# Sắp xếp lại cột (đưa Thứ sau Ngay)
+cols = df_kq.columns.tolist()
+if "Thu" in cols and "Ngay" in cols:
+    cols.remove("Thu")
+    ngay_idx = cols.index("Ngay")
+    cols.insert(ngay_idx + 1, "Thu")
+    df_kq = df_kq[cols]
 
 # Xuất file kết quả chính (MaHP, ToThi, Ngay, Ca, PhongThi)
 output_path = os.path.join(BASE_DIR, "ket_qua_xep_lich_thi.xlsx")
@@ -1193,6 +1641,12 @@ output_cols = [
 # Đảm bảo các cột tồn tại (nếu ko có Lớp thì bỏ qua)
 existing_cols = [c for c in output_cols if c in df_final_sv.columns]
 df_final_sv = df_final_sv[existing_cols]
+
+# CRITICAL: Loại bỏ duplicate cuối cùng (nếu có)
+before_dedup = len(df_final_sv)
+df_final_sv = df_final_sv.drop_duplicates()
+if len(df_final_sv) < before_dedup:
+    print(f"   ⚠️ Đã loại bỏ {before_dedup - len(df_final_sv)} dòng trùng lặp trong output")
 
 output_sv_path = os.path.join(BASE_DIR, "BangTongHopLichThiSinhVien_KetQua.xlsx")
 df_final_sv.to_excel(output_sv_path, index=False)

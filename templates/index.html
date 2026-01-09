@@ -77,80 +77,12 @@
                 </div>
             </section>
 
-            <!-- Step 2: Configuration -->
-            <section class="card" id="config-section">
-                <div class="card-header">
-                    <span class="step-badge">2</span>
-                    <h2>Cấu hình ràng buộc</h2>
-                </div>
-                <div class="card-body">
-                    <div class="config-grid">
-                        <!-- Constraints -->
-                        <div class="config-group">
-                            <h3>Ràng buộc</h3>
 
-                            <div class="config-item">
-                                <label class="toggle-label">
-                                    <input type="checkbox" id="cfg-sv-khong-trung" checked>
-                                    <span class="toggle-switch"></span>
-                                    <span class="toggle-text">Sinh viên không trùng ca thi</span>
-                                </label>
-                                <p class="config-desc">Đảm bảo mỗi sinh viên không phải thi 2 môn cùng một ca</p>
-                            </div>
 
-                            <div class="config-item">
-                                <label class="toggle-label">
-                                    <input type="checkbox" id="cfg-ctdt-trung-ngay" checked>
-                                    <span class="toggle-switch"></span>
-                                    <span class="toggle-text">CTĐT/Khóa không thi cùng ngày</span>
-                                </label>
-                                <p class="config-desc">Một CTĐT/Khóa chỉ được thi tối đa 1 môn mỗi ngày (ràng buộc cứng)
-                                </p>
-                            </div>
-
-                            <div class="config-item">
-                                <label class="toggle-label">
-                                    <input type="checkbox" id="cfg-ctdt-lien-ngay" checked>
-                                    <span class="toggle-switch"></span>
-                                    <span class="toggle-text">CTĐT/Khóa không thi liền ngày</span>
-                                </label>
-                                <p class="config-desc">Cố gắng tránh thi 2 ngày liên tiếp (ràng buộc mềm - penalty)</p>
-                            </div>
-                        </div>
-
-                        <!-- Parameters -->
-                        <div class="config-group">
-                            <h3>Tham số</h3>
-
-                            <div class="config-item">
-                                <label for="cfg-max-to">Số tổ thi tối đa mỗi ca</label>
-                                <input type="number" id="cfg-max-to" value="68" min="1" max="200">
-                                <p class="config-desc">Sẽ tự động cập nhật theo số phòng trong cau_hinh.xlsx</p>
-                            </div>
-
-                            <div class="config-item">
-                                <label for="cfg-penalty">Hệ số penalty thi liền ngày</label>
-                                <input type="number" id="cfg-penalty" value="10" min="1" max="100">
-                            </div>
-
-                            <div class="config-item">
-                                <label for="cfg-timeout">Timeout solver (giây)</label>
-                                <input type="number" id="cfg-timeout" value="120" min="10" max="600">
-                            </div>
-
-                            <div class="config-item">
-                                <label for="cfg-workers">Số worker song song</label>
-                                <input type="number" id="cfg-workers" value="8" min="1" max="32">
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- Step 3: Run Solver -->
+            <!-- Step 2: Run Solver -->
             <section class="card" id="solve-section">
                 <div class="card-header">
-                    <span class="step-badge">3</span>
+                    <span class="step-badge">2</span>
                     <h2>Chạy xếp lịch</h2>
                 </div>
                 <div class="card-body">
@@ -233,10 +165,10 @@
                 </div>
             </section>
 
-            <!-- Step 4: Visual Schedule Visualization -->
+            <!-- Step 3: Visual Schedule Visualization -->
             <section class="card" id="visual-section" style="display: none;">
                 <div class="card-header">
-                    <span class="step-badge">4</span>
+                    <span class="step-badge">3</span>
                     <h2>Xem & Chỉnh sửa Lịch trực quan</h2>
                 </div>
                 <div class="card-body">
@@ -254,15 +186,42 @@
                         </button>
                     </div>
 
-                    <div class="schedule-legend" style="margin: 15px 0;">
+                    <!-- Batch Move Controls -->
+                    <div class="batch-controls"
+                        style="background:#f8f9fa; padding:15px; border-radius:8px; margin-bottom:15px; display:flex; flex-wrap:wrap; gap:15px; align-items:center;">
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <label style="color:#000;"><strong>Target Day:</strong></label>
+                            <select id="target-day-select" class="form-control" style="width:auto; min-width:180px;">
+                                <option value="">-- Select Day --</option>
+                            </select>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <label style="color:#000;"><strong>Target Shift:</strong></label>
+                            <select id="target-shift-select" class="form-control" style="width:auto; min-width:100px;">
+                                <option value="">-- Ca --</option>
+                                <option value="1">Ca 1</option>
+                                <option value="2">Ca 2</option>
+                                <option value="3">Ca 3</option>
+                                <option value="4">Ca 4</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-primary" id="btn-batch-move" onclick="batchMoveSelected()" disabled>
+                            Move Selected
+                        </button>
+                        <button class=" btn btn-secondary" onclick="clearAllSelections()">
+                            <label style="color:#000;"><strong>Clear Selection</strong></label>
+                        </button>
+                        <span id="selection-count" style="color:#666; font-weight:bold;">0 selected</span>
+                    </div>
+
+                    <div class="schedule-legend" style="margin: 10px 0;">
                         <span class="legend-item"><span class="legend-color occupied"
-                                style="background:#e3f2fd; border:1px solid #2196f3; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Có
-                            môn thi</span>
+                                style="background:#e3f2fd; border:1px solid #2196f3; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Has
+                            Exam</span>
                         <span class="legend-item" style="margin-left:15px;"><span class="legend-color empty"
-                                style="background:#f5f5f5; border:1px solid #ddd; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Trống</span>
+                                style="background:#f5f5f5; border:1px solid #ddd; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Empty</span>
                         <span class="legend-item" style="margin-left:15px;"><span class="legend-color selected"
-                                style="background:#fff3cd; border:1px solid #ffc107; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Đang
-                            chọn (Move/Swap)</span>
+                                style="background:#c8e6c9; border:2px solid #4caf50; width:15px; height:15px; display:inline-block; vertical-align:middle; margin-right:5px;"></span>Selected</span>
                     </div>
 
                     <div class="schedule-grid-wrapper" style="overflow-x: auto;">

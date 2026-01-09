@@ -18,7 +18,7 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 RESULT_FOLDER = os.path.join(BASE_DIR, 'results')
-CONFIG_FILE = os.path.join(BASE_DIR, 'scheduler_config.json')
+RESULT_FOLDER = os.path.join(BASE_DIR, 'results')
 
 # Tạo thư mục nếu chưa có
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -40,28 +40,7 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def get_default_config():
-    return {
-        'max_to_per_ca': 68,  # Sẽ được tự động cập nhật theo số phòng
-        'sv_khong_trung_ca': True,
-        'ctdt_khong_trung_ngay': True,  # RÀNG BUỘC CỨNG: không thi cùng ngày
-        'ctdt_khong_lien_ngay': True,   # RÀNG BUỘC MỀM: penalty thi liền ngày
-        'he_so_penalty_lien_ngay': 10,
-        'solver_timeout': 120,
-        'num_workers': 8
-    }
 
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return get_default_config()
-
-
-def save_config(config):
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, ensure_ascii=False, indent=2)
 
 
 @app.route('/')
@@ -118,40 +97,7 @@ def get_files():
     return jsonify({'success': True, 'files': files})
 
 
-@app.route('/api/config', methods=['GET'])
-def get_config():
-    """Lấy cấu hình hiện tại"""
-    config = load_config()
-    return jsonify({'success': True, 'config': config})
 
-
-@app.route('/api/config', methods=['POST'])
-def update_config():
-    """Cập nhật cấu hình"""
-    data = request.get_json()
-    if not data:
-        return jsonify({'success': False, 'error': 'Không có dữ liệu'})
-    
-    config = load_config()
-    
-    # Cập nhật các field
-    if 'max_to_per_ca' in data:
-        config['max_to_per_ca'] = int(data['max_to_per_ca'])
-    if 'sv_khong_trung_ca' in data:
-        config['sv_khong_trung_ca'] = bool(data['sv_khong_trung_ca'])
-    if 'ctdt_khong_trung_ngay' in data:
-        config['ctdt_khong_trung_ngay'] = bool(data['ctdt_khong_trung_ngay'])
-    if 'ctdt_khong_lien_ngay' in data:
-        config['ctdt_khong_lien_ngay'] = bool(data['ctdt_khong_lien_ngay'])
-    if 'he_so_penalty_lien_ngay' in data:
-        config['he_so_penalty_lien_ngay'] = int(data['he_so_penalty_lien_ngay'])
-    if 'solver_timeout' in data:
-        config['solver_timeout'] = int(data['solver_timeout'])
-    if 'num_workers' in data:
-        config['num_workers'] = int(data['num_workers'])
-    
-    save_config(config)
-    return jsonify({'success': True, 'config': config})
 
 
 @app.route('/api/solve', methods=['POST'])
@@ -170,16 +116,16 @@ def solve():
             'error': f'Thiếu các file: {", ".join(missing_files)}'
         })
     
-    # Load config
-    config_data = load_config()
+    # Config mặc định (đã loại bỏ tùy chỉnh)
     config = SchedulerConfig(
-        max_to_per_ca=config_data.get('max_to_per_ca', 68),
-        sv_khong_trung_ca=config_data.get('sv_khong_trung_ca', True),
-        ctdt_khong_trung_ngay=config_data.get('ctdt_khong_trung_ngay', True),
-        ctdt_khong_lien_ngay=config_data.get('ctdt_khong_lien_ngay', True),
-        he_so_penalty_lien_ngay=config_data.get('he_so_penalty_lien_ngay', 10),
-        solver_timeout=config_data.get('solver_timeout', 120),
-        num_workers=config_data.get('num_workers', 8)
+        max_to_per_ca=68,
+        sv_khong_trung_ca=True,
+        ctdt_khong_trung_ngay=True,
+        ctdt_khong_lien_ngay=True,
+        he_so_penalty_lien_ngay=10,
+        solver_timeout=300, # Tăng timeout mặc định
+        num_workers=8,
+        distribute_uniformly=True # Luôn bật load balancing
     )
     
     # Khởi tạo scheduler
@@ -244,6 +190,72 @@ def download_file(filename):
         return send_file(filepath, as_attachment=True)
     return jsonify({'success': False, 'error': 'File không tồn tại'})
 
+
+# ==========================================
+# HELPER: Sync Student File After Schedule Update
+# ==========================================
+def sync_student_file():
+    """Cập nhật BangTongHopLichThiSinhVien_KetQua.xlsx khi lịch thi thay đổi"""
+    try:
+        schedule_path = os.path.join(BASE_DIR, 'ket_qua_xep_lich_thi.xlsx')
+        sv_file_path = os.path.join(BASE_DIR, 'BangTongHopLichThiSinhVien_KetQua.xlsx')
+        
+        if not os.path.exists(sv_file_path):
+            print("   ⚠️ BangTongHopLichThiSinhVien_KetQua.xlsx chưa tồn tại, bỏ qua sync.")
+            return
+        
+        if not os.path.exists(schedule_path):
+            print("   ⚠️ ket_qua_xep_lich_thi.xlsx chưa tồn tại, bỏ qua sync.")
+            return
+        
+        # Load files
+        df_sv = pd.read_excel(sv_file_path)
+        df_schedule = pd.read_excel(schedule_path)
+        
+        # Normalize column names for matching
+        # Student file uses "Mã HP", "Tổ thi" vs schedule uses "MaHP", "ToThi"
+        # Map schedule columns
+        schedule_map = {}
+        for _, row in df_schedule.iterrows():
+            mahp = str(row.get('MaHP', '')).strip()
+            tothi = int(row.get('ToThi', 0)) if pd.notna(row.get('ToThi')) else 0
+            key = (mahp, tothi)
+            schedule_map[key] = {
+                'Ngày thi': row.get('Ngay', ''),
+                'Giờ thi': row.get('GioThi', '') if 'GioThi' in df_schedule.columns else '',
+                'Phòng thi': row.get('PhongThi', ''),
+                'Ca': row.get('Ca', '')
+            }
+        
+        # Map Ca to Gio
+        CA_TO_GIO = {1: "07:00", 2: "09:30", 3: "13:00", 4: "15:30"}
+        
+        # Update student file
+        updated_count = 0
+        for idx, row in df_sv.iterrows():
+            mahp = str(row.get('Mã HP', '')).strip()
+            tothi = int(row.get('Tổ thi', 0)) if pd.notna(row.get('Tổ thi')) else 0
+            key = (mahp, tothi)
+            
+            if key in schedule_map:
+                new_data = schedule_map[key]
+                if 'Ngày thi' in df_sv.columns:
+                    df_sv.at[idx, 'Ngày thi'] = new_data['Ngày thi']
+                if 'Phòng thi' in df_sv.columns:
+                    df_sv.at[idx, 'Phòng thi'] = new_data['Phòng thi']
+                if 'Giờ thi' in df_sv.columns:
+                    gio = new_data['Giờ thi']
+                    if not gio and new_data['Ca']:
+                        gio = CA_TO_GIO.get(int(new_data['Ca']), '')
+                    df_sv.at[idx, 'Giờ thi'] = gio
+                updated_count += 1
+        
+        # Save updated student file
+        df_sv.to_excel(sv_file_path, index=False)
+        print(f"   ✅ Synced {updated_count} rows to BangTongHopLichThiSinhVien_KetQua.xlsx")
+        
+    except Exception as e:
+        print(f"   ⚠️ Error syncing student file: {e}")
 
 # ==========================================
 # SCHEDULE VISUALIZATION & EDITING APIs
@@ -364,10 +376,183 @@ def update_schedule():
         # Save back to Excel
         df.to_excel(schedule_path, index=False)
         
+        # Sync changes to student file
+        sync_student_file()
+        
         return jsonify({'success': True, 'message': msg})
 
     except Exception as e:
         print(f"Error updating schedule: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/schedule/batch-update', methods=['POST'])
+def batch_update_schedule():
+    """Batch update: Move multiple exam groups to a target day/shift with conflict checking"""
+    try:
+        data = request.json
+        # data format:
+        # {
+        #   "items": [{ "MaHP": "...", "ToThi": 1 }, ...],
+        #   "target": { "Ngay": "...", "Ca": 1 },
+        #   "force_move": false  # If true, bypass same-day warning
+        # }
+        
+        schedule_path = os.path.join(BASE_DIR, 'ket_qua_xep_lich_thi.xlsx')
+        config_path = os.path.join(UPLOAD_FOLDER, 'cau_hinh.xlsx')
+        sv_path = os.path.join(UPLOAD_FOLDER, 'danhsachSV.xlsx')
+        
+        if not os.path.exists(schedule_path):
+            return jsonify({'success': False, 'error': 'Schedule file not found'})
+            
+        df_schedule = pd.read_excel(schedule_path)
+        
+        items = data.get('items', [])
+        target = data.get('target', {})
+        force_move = data.get('force_move', False)
+        
+        if not items or not target:
+            return jsonify({'success': False, 'error': 'Missing items or target'})
+        
+        target_day = target.get('Ngay')
+        target_shift = int(target.get('Ca'))
+        
+        # === CONFLICT CHECK ===
+        # Load student list to check conflicts
+        if os.path.exists(sv_path):
+            df_sv = pd.read_excel(sv_path)
+            df_sv['MaSV'] = df_sv['MaSV'].astype(str).str.strip()
+            df_sv['MaHP'] = df_sv['MaHP'].astype(str).str.strip()
+            
+            # Build map: MaSV -> list of MaHP they take
+            sv_to_mahp = df_sv.groupby('MaSV')['MaHP'].apply(list).to_dict()
+            
+            # Get students in items being moved with their ToThi
+            moving_info = {item['MaHP']: item['ToThi'] for item in items}
+            moving_mahps = list(moving_info.keys())
+            students_in_moving = df_sv[df_sv['MaHP'].isin(moving_mahps)][['MaSV', 'MaHP']].drop_duplicates()
+            
+            # Get exams already in target slot (same day, same shift)
+            exams_same_shift_df = df_schedule[
+                (df_schedule['Ngay'] == target_day) & 
+                (df_schedule['Ca'] == target_shift) &
+                (~df_schedule['MaHP'].isin(moving_mahps))
+            ][['MaHP', 'ToThi']]
+            exams_same_shift = set(exams_same_shift_df['MaHP'].unique())
+            
+            # Get exams on same day (any shift)
+            exams_same_day_df = df_schedule[
+                (df_schedule['Ngay'] == target_day) &
+                (~df_schedule['MaHP'].isin(moving_mahps))
+            ][['MaHP', 'ToThi', 'Ca']]
+            exams_same_day = set(exams_same_day_df['MaHP'].unique())
+            
+            # Check for SAME-SHIFT conflicts (HARD BLOCK)
+            conflict_details_shift = []
+            for _, row in students_in_moving.iterrows():
+                masv = row['MaSV']
+                moving_mahp = row['MaHP']
+                moving_to = moving_info[moving_mahp]
+                
+                # Check if this student has other exams in target shift
+                student_other_mahps = [m for m in sv_to_mahp.get(masv, []) if m in exams_same_shift]
+                for conflict_mahp in student_other_mahps:
+                    conflict_to = exams_same_shift_df[exams_same_shift_df['MaHP'] == conflict_mahp]['ToThi'].values
+                    conflict_to = int(conflict_to[0]) if len(conflict_to) > 0 else '?'
+                    conflict_details_shift.append({
+                        'MaSV': masv,
+                        'moving_MaHP': moving_mahp,
+                        'moving_ToThi': moving_to,
+                        'conflict_MaHP': conflict_mahp,
+                        'conflict_ToThi': conflict_to
+                    })
+            
+            if conflict_details_shift:
+                # Limit to 15 entries
+                return jsonify({
+                    'success': False,
+                    'error_type': 'CONFLICT_SHIFT',
+                    'error': f'Cannot move! {len(conflict_details_shift)} conflict(s) in same shift.',
+                    'conflict_details': conflict_details_shift[:15]
+                })
+            
+            # Check for SAME-DAY conflicts (SOFT WARNING)
+            if not force_move:
+                conflict_details_day = []
+                for _, row in students_in_moving.iterrows():
+                    masv = row['MaSV']
+                    moving_mahp = row['MaHP']
+                    moving_to = moving_info[moving_mahp]
+                    
+                    student_other_mahps = [m for m in sv_to_mahp.get(masv, []) if m in exams_same_day]
+                    for conflict_mahp in student_other_mahps:
+                        conflict_row = exams_same_day_df[exams_same_day_df['MaHP'] == conflict_mahp].iloc[0] if len(exams_same_day_df[exams_same_day_df['MaHP'] == conflict_mahp]) > 0 else None
+                        if conflict_row is not None:
+                            conflict_details_day.append({
+                                'MaSV': masv,
+                                'moving_MaHP': moving_mahp,
+                                'moving_ToThi': moving_to,
+                                'conflict_MaHP': conflict_mahp,
+                                'conflict_ToThi': int(conflict_row['ToThi']),
+                                'conflict_Ca': int(conflict_row['Ca'])
+                            })
+                
+                if conflict_details_day:
+                    return jsonify({
+                        'success': False,
+                        'error_type': 'WARNING_SAME_DAY',
+                        'error': f'Warning: {len(conflict_details_day)} same-day conflict(s).',
+                        'conflict_details': conflict_details_day[:15],
+                        'can_force': True
+                    })
+        
+        # === ROOM CHECK ===
+        if os.path.exists(config_path):
+            df_rooms = pd.read_excel(config_path, sheet_name='PhongThi')
+            all_rooms = df_rooms['PhongThi'].dropna().astype(str).str.strip().tolist()
+        else:
+            all_rooms = df_schedule['PhongThi'].unique().tolist()
+        
+        used_rooms = df_schedule[
+            (df_schedule['Ngay'] == target_day) & 
+            (df_schedule['Ca'] == target_shift)
+        ]['PhongThi'].tolist()
+        
+        available_rooms = [r for r in all_rooms if r not in used_rooms]
+        
+        if len(available_rooms) < len(items):
+            return jsonify({
+                'success': False, 
+                'error': f'Not enough rooms. Need {len(items)}, only {len(available_rooms)} available.'
+            })
+        
+        # === UPDATE SCHEDULE ===
+        moved_count = 0
+        for i, item in enumerate(items):
+            idx = df_schedule[
+                (df_schedule['MaHP'] == item['MaHP']) & 
+                (df_schedule['ToThi'] == item['ToThi'])
+            ].index
+            
+            if len(idx) > 0:
+                idx = idx[0]
+                df_schedule.at[idx, 'Ngay'] = target_day
+                df_schedule.at[idx, 'Ca'] = target_shift
+                df_schedule.at[idx, 'PhongThi'] = available_rooms[i]
+                moved_count += 1
+        
+        df_schedule.to_excel(schedule_path, index=False)
+        
+        # Sync changes to student file
+        sync_student_file()
+        
+        return jsonify({
+            'success': True, 
+            'message': f'Moved {moved_count} exam group(s) successfully.'
+        })
+
+    except Exception as e:
+        print(f"Error batch updating schedule: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 
@@ -387,6 +572,150 @@ def list_results():
     
     results.sort(key=lambda x: x['created'], reverse=True)
     return jsonify({'success': True, 'results': results})
+
+
+@app.route('/api/export-students', methods=['POST'])
+def export_students():
+    """Xuất file BangTongHopLichThiSinhVien_KetQua.xlsx từ lịch đã chỉnh sửa"""
+    try:
+        # Paths
+        schedule_path = os.path.join(BASE_DIR, 'ket_qua_xep_lich_thi.xlsx')
+        sv_path = os.path.join(BASE_DIR, 'danhsachSV.xlsx')
+        lhp_path = os.path.join(BASE_DIR, 'danhsachLHP.xlsx')
+        config_path = os.path.join(BASE_DIR, 'cau_hinh.xlsx')
+        output_path = os.path.join(BASE_DIR, 'BangTongHopLichThiSinhVien_KetQua.xlsx')
+        
+        # Check files exist
+        if not os.path.exists(schedule_path):
+            return jsonify({'success': False, 'error': 'Chưa có file lịch thi. Vui lòng xếp lịch trước.'})
+        if not os.path.exists(sv_path):
+            return jsonify({'success': False, 'error': 'Chưa có file danhsachSV.xlsx'})
+        if not os.path.exists(lhp_path):
+            return jsonify({'success': False, 'error': 'Chưa có file danhsachLHP.xlsx'})
+        
+        # Load data
+        df_kq = pd.read_excel(schedule_path)
+        df_sv = pd.read_excel(sv_path)
+        df_lhp = pd.read_excel(lhp_path)
+        
+        # Normalize MaHP
+        df_sv["MaSV"] = df_sv["MaSV"].astype(str).str.strip()
+        df_sv["Ten"] = df_sv["Ten"].astype(str).str.strip()
+        df_sv["MaHP"] = df_sv["MaHP"].astype(str).str.strip()
+        df_kq["MaHP"] = df_kq["MaHP"].astype(str).str.strip()
+        df_lhp["MaHP"] = df_lhp["MaHP"].astype(str).str.strip()
+        
+        # Remove duplicates
+        df_sv = df_sv.drop_duplicates(subset=["MaSV", "MaHP"], keep="first")
+        
+        # Create phong_theo_mon
+        phong_theo_mon = df_lhp.set_index("MaHP")[["ToThi"]].to_dict("index")
+        
+        # Distribute students to ToThi
+        ds_sv_to_thi = []
+        for mahp, df_mhp in df_sv.groupby("MaHP"):
+            if mahp not in phong_theo_mon:
+                continue
+            so_to = int(phong_theo_mon[mahp]["ToThi"])
+            df_mhp_sorted = df_mhp.sort_values("Ten").reset_index(drop=True)
+            N = len(df_mhp_sorted)
+            if N == 0:
+                continue
+            base = N // so_to
+            du = N % so_to
+            start_idx = 0
+            for to in range(1, so_to + 1):
+                so_sv_to = base + (1 if to <= du else 0)
+                df_to = df_mhp_sorted.iloc[start_idx:start_idx + so_sv_to]
+                for _, row in df_to.iterrows():
+                    ds_sv_to_thi.append({
+                        "MaSV": row["MaSV"],
+                        "Ten": row["Ten"],
+                        "MaHP": mahp,
+                        "ToThi": to
+                    })
+                start_idx += so_sv_to
+        
+        df_sv_to_thi = pd.DataFrame(ds_sv_to_thi)
+        
+        # Merge with schedule
+        df_final_sv = pd.merge(df_sv_to_thi, df_kq, on=["MaHP", "ToThi"], how="left")
+        
+        # Add course info
+        available_lhp_cols = ["MaHP"]
+        if "TenMH" in df_lhp.columns:
+            available_lhp_cols.append("TenMH")
+        elif "Ten_MH" in df_lhp.columns:
+            available_lhp_cols.append("Ten_MH")
+        if "SoTC" in df_lhp.columns:
+            available_lhp_cols.append("SoTC")
+        
+        if len(available_lhp_cols) > 1:
+            df_lhp_info = df_lhp[available_lhp_cols].drop_duplicates("MaHP")
+            df_final_sv = pd.merge(df_final_sv, df_lhp_info, on="MaHP", how="left")
+        
+        # Add time from Ca
+        CA_TO_GIO = {1: "07:00", 2: "09:30", 3: "13:00", 4: "15:30"}
+        if "Ca" in df_final_sv.columns:
+            df_final_sv["GioThi"] = df_final_sv["Ca"].map(CA_TO_GIO)
+        
+        # Split Ho Ten
+        def tach_ho_ten(full_name):
+            if pd.isna(full_name):
+                return "", ""
+            parts = str(full_name).strip().split()
+            if len(parts) == 0:
+                return "", ""
+            elif len(parts) == 1:
+                return "", parts[0]
+            else:
+                return " ".join(parts[:-1]), parts[-1]
+        
+        df_final_sv["HoDem"] = df_final_sv["Ten"].apply(lambda x: tach_ho_ten(x)[0])
+        df_final_sv["TenSV"] = df_final_sv["Ten"].apply(lambda x: tach_ho_ten(x)[1])
+        
+        # Rename columns
+        rename_dict = {
+            "Ten_MH": "Tên môn", "TenMH": "Tên môn",
+            "SoTC": "Số TC", "MaSV": "Mã SV",
+            "Ngay": "Ngày thi", "GioThi": "Giờ thi",
+            "PhongThi": "Phòng thi", "ToThi": "Tổ thi",
+            "HoDem": "Họ đệm", "TenSV": "Tên"
+        }
+        df_final_sv = df_final_sv.rename(columns=rename_dict)
+        
+        # Add required columns
+        df_final_sv["Đợt thi"] = "Đợt 1"
+        df_final_sv["Nhóm thi"] = "1"
+        df_final_sv["Ghi chú"] = ""
+        df_final_sv["Mã HP"] = df_final_sv["MaHP"]
+        
+        # Select output columns
+        output_cols = [
+            "Mã HP", "Tên môn", "Số TC", "Đợt thi", "Nhóm thi", "Tổ thi",
+            "Ngày thi", "Giờ thi", "Phòng thi", "Mã SV", "Họ đệm", "Tên", "Ghi chú"
+        ]
+        existing_cols = [c for c in output_cols if c in df_final_sv.columns]
+        df_final_sv = df_final_sv[existing_cols]
+        
+        # Remove duplicates
+        df_final_sv = df_final_sv.drop_duplicates()
+        
+        # Export
+        df_final_sv.to_excel(output_path, index=False)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Đã xuất file thành công: {len(df_final_sv)} dòng',
+            'filename': 'BangTongHopLichThiSinhVien_KetQua.xlsx',
+            'rows': len(df_final_sv)
+        })
+        
+    except Exception as e:
+        print(f"Error exporting students: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
 
 
 @app.route('/api/preview/<file_type>', methods=['GET'])

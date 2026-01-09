@@ -17,9 +17,11 @@ class SchedulerConfig:
     sv_khong_trung_ca: bool = True
     ctdt_khong_trung_ngay: bool = True  # Ràng buộc cứng: không thi cùng ngày
     ctdt_khong_lien_ngay: bool = True   # Ràng buộc mềm: penalty nếu thi liền ngày
-    he_so_penalty_lien_ngay: int = 1000000 # Tăng penalty cực cao để hạn chế tối đa
-    solver_timeout: int = 300 # Tăng timeout để solver có thời gian tìm kiếm
+    he_so_penalty_lien_ngay: int = 1000000 
+    solver_timeout: int = 300 
     num_workers: int = 8
+    distribute_uniformly: bool = True # Mặc định bật load balancing
+
 
 
 @dataclass
@@ -60,7 +62,8 @@ class ExamScheduler:
         self.ds_mahp_set = set()
         self.ctdt_khoa_to_mon = {}
         self.priority_phase2_config = [] # List[(CTDT, Khoa, SoNgay)]
-        
+        self.split_courses = {} # {MaHP_gốc: [(MaHP_D1, ToThi_D1), ...]}
+                
         # Mapping Ca -> Giờ thi
         self.CA_TO_GIO = {
             1: "07:00",
@@ -82,6 +85,9 @@ class ExamScheduler:
             self.df_sv["MaSV"] = self.df_sv["MaSV"].astype(str).str.strip()
             self.df_sv["Ten"] = self.df_sv["Ten"].astype(str).str.strip()
             self.df_sv["MaHP"] = self.df_sv["MaHP"].astype(str).str.strip()
+            
+            # Chuẩn hóa dữ liệu LHP để khớp với SV
+            self.df_lhp["MaHP"] = self.df_lhp["MaHP"].astype(str).str.strip()
             
             # Đọc các sheet cấu hình
             df_hk = pd.read_excel(path_cfg, sheet_name="HK")
@@ -182,6 +188,12 @@ class ExamScheduler:
             )
             
             # Rải sinh viên vào tổ thi
+            # Remove duplicates first
+            original_count = len(self.df_sv)
+            self.df_sv = self.df_sv.drop_duplicates(subset=["MaSV", "MaHP"], keep="first")
+            if len(self.df_sv) < original_count:
+                print(f"   [WARNING] Removed {original_count - len(self.df_sv)} duplicate (MaSV, MaHP) entries")
+            
             ds_sv_to_thi = []
             for mahp, df_mhp in self.df_sv.groupby("MaHP"):
                 if mahp not in self.phong_theo_mon:
@@ -257,9 +269,13 @@ class ExamScheduler:
                           time_limit: int = 60,
                           restricted_days: list = None,
                           prioritize_early: bool = True,
-                          relax_same_day: bool = False):
+                          relax_same_day: bool = False,
+                          distribute_uniformly: bool = False):
         """Helper chạy solver cho một phase"""
-        print(f"🚀 [Scheduler] Đang chạy {phase_name}...")
+        print(f" [Scheduler] Starting {phase_name}...")
+        print(f"   Courses to schedule: {len(ds_mon_to_schedule)}")
+        print(f"   relax_same_day: {relax_same_day}")
+        print(f"   distribute_uniformly: {distribute_uniformly}")
         
         model = cp_model.CpModel()
         
@@ -325,8 +341,28 @@ class ExamScheduler:
                         if mahp not in (fixed_schedule or {})  # Môn mới
                     ) <= max(0, remaining)  # Đảm bảo không âm
                 )
+
+        # 3.5 Ràng buộc môn chia: D2 phải cách D1 ít nhất 2 ngày
+        MIN_GAP_SPLIT = 2
+        ds_mon_set = set(ds_mon_to_schedule)
+        
+        for mahp_goc, split_list in self.split_courses.items():
+            if len(split_list) >= 2:
+                mahp_d1 = split_list[0][0]
+                mahp_d2 = split_list[1][0]
+                
+                if mahp_d1 in ds_mon_set and mahp_d2 in ds_mon_set:
+                    day_d1 = model.NewIntVar(1, len(DAYS), f"day_{mahp_d1}")
+                    day_d2 = model.NewIntVar(1, len(DAYS), f"day_{mahp_d2}")
+                    
+                    model.Add(day_d1 == sum(d * z[(mahp_d1, d, c)] for d in DAYS for c in CA))
+                    model.Add(day_d2 == sum(d * z[(mahp_d2, d, c)] for d in DAYS for c in CA))
+                    
+                    model.Add(day_d2 >= day_d1 + MIN_GAP_SPLIT)
         
         # 4. Sinh viên không trùng ca
+        # Phase 1/2 (relax_same_day=False): HARD CONSTRAINT
+        # Phase 3 (relax_same_day=True): SOFT với penalty CỰC CAO
         ds_mon_set = set(ds_mon_to_schedule)
         penalty_sv_trung_ca = []
         if self.config.sv_khong_trung_ca:
@@ -337,12 +373,29 @@ class ExamScheduler:
                 for d in DAYS:
                     for c in CA:
                         sum_sv = sum(z[(mahp, d, c)] for mahp in mon_list_filtered)
+                        
                         if relax_same_day:
+                            # SOFT CONSTRAINT for Phase 3
                             vi_pham = model.NewIntVar(0, len(mon_list_filtered), f"vpsv_{masv}_{d}_{c}")
                             model.Add(vi_pham >= sum_sv - 1)
                             penalty_sv_trung_ca.append(vi_pham)
                         else:
+                            # HARD CONSTRAINT for Phase 1/2
                             model.Add(sum_sv <= 1)
+        
+        # 4b. Penalty cho SV thi NHIỀU MÔN CÙNG NGÀY (khác ca) - SOFT CONSTRAINT
+        # Hạn chế tối đa SV phải thi nhiều môn trong 1 ngày
+        penalty_sv_trung_ngay = []
+        for masv, mon_list in self.sv_to_mon.items():
+            mon_list_filtered = [m for m in mon_list if m in ds_mon_set]
+            if len(mon_list_filtered) <= 1:
+                continue
+            
+            for d in DAYS:
+                sum_sv_ngay = sum(z[(mahp, d, c)] for mahp in mon_list_filtered for c in CA)
+                vi_pham_ngay = model.NewIntVar(0, len(mon_list_filtered), f"vpsvngay_{masv}_{d}")
+                model.Add(vi_pham_ngay >= sum_sv_ngay - 1)
+                penalty_sv_trung_ngay.append(vi_pham_ngay)
         
         # 5. CTĐT-Khóa không thi cùng ngày
         penalty_trung_ngay = []
@@ -400,13 +453,18 @@ class ExamScheduler:
         for pen in penalty_trung_ngay:
             total_objective.append(HE_SO_TRUNG_NGAY * pen)
         
+        # 0c. Penalty SV thi nhiều môn cùng ngày (khác ca)
+        HE_SO_SV_TRUNG_NGAY = 5000000
+        for pen in penalty_sv_trung_ngay:
+            total_objective.append(HE_SO_SV_TRUNG_NGAY * pen)
+        
         # 1. Penalty liền ngày
         HE_SO_PENALTY_LIEN_NGAY = self.config.he_so_penalty_lien_ngay
         for pen in penalty_lien_ngay:
             total_objective.append(HE_SO_PENALTY_LIEN_NGAY * pen)
             
         # 2. Ưu tiên ngày sớm (CHỈ KHI prioritize_early=True)
-        if prioritize_early:
+        if prioritize_early and not distribute_uniformly:
             for mahp in ds_mon_to_schedule:
                 so_to = self.phong_theo_mon[mahp]["ToThi"]
                 for d in DAYS:
@@ -414,11 +472,41 @@ class ExamScheduler:
                         # Cách tính điểm phạt: ngày càng lớn phạt càng cao => ưu tiên ngày nhỏ
                         total_objective.append(z[(mahp, d, c)] * d * so_to * 1)
         
-        # 3. Ưu tiên ca sớm
-        for mahp in ds_mon_to_schedule:
+        # 3. Ưu tiên ca sớm (CHỈ KHI KHÔNG LOAD BALANCING)
+        if not distribute_uniformly:
+            for mahp in ds_mon_to_schedule:
+                for d in DAYS:
+                    for c in CA:
+                        total_objective.append(z[(mahp, d, c)] * c * 0.1)
+
+        # 4. LOAD BALANCING (Distribute Uniformly)
+        if distribute_uniformly:
+            print("   [Load Balancing] Enabling distribute_uniformly...")
+            
+            # 4.1 Cân bằng số lượng môn thi mỗi ngày (Minimize Max Exams Per Day)
+            daily_counts = []
             for d in DAYS:
-                for c in CA:
-                    total_objective.append(z[(mahp, d, c)] * c * 0.1)
+                # Đếm số môn thi trong ngày d
+                count = sum(z[(mahp, d, c)] for mahp in ds_mon_to_schedule for c in CA)
+                daily_counts.append(count)
+            
+            # Biến Max exams/day
+            max_exams_per_day = model.NewIntVar(0, len(ds_mon_to_schedule), "max_exams_per_day")
+            model.AddMaxEquality(max_exams_per_day, daily_counts)
+            
+            # Hàm mục tiêu: Minimize Max
+            total_objective.append(max_exams_per_day * 5000)
+            
+            # 4.2 Cân bằng số lượng môn thi mỗi loại ca (Minimize Max Exams Per Shift ID)
+            shift_counts = []
+            for c in CA:
+                count = sum(z[(mahp, d, c)] for mahp in ds_mon_to_schedule for d in DAYS)
+                shift_counts.append(count)
+                
+            max_exams_per_shift = model.NewIntVar(0, len(ds_mon_to_schedule), "max_exams_per_shift")
+            model.AddMaxEquality(max_exams_per_shift, shift_counts)
+            
+            total_objective.append(max_exams_per_shift * 2000)
                     
         model.Minimize(sum(total_objective))
         
@@ -444,9 +532,62 @@ class ExamScheduler:
     def solve(self) -> SchedulerResult:
         """Chạy solver xếp lịch 3 giai đoạn"""
         if not self.data_loaded:
-            return SchedulerResult(status="ERROR", error="Dữ liệu chưa được load")
+            return SchedulerResult(status="ERROR", error="Data not loaded")
             
         try:
+             # 0. CHIA MÔN LỚN THÀNH 2 NGÀY (Logic from test.py)
+            NGUONG_CHIA_TO = 25
+            self.split_courses = {}  # Reset
+            split_courses = {}  # Local var for easy access
+
+            print("\n CHECK LARGE EXAM GROUPS (> 25):")
+            for mahp, info in list(self.phong_theo_mon.items()):
+                to_thi = info["ToThi"]
+                if to_thi > NGUONG_CHIA_TO:
+                    to_d1 = to_thi // 2
+                    to_d2 = to_thi - to_d1
+                    
+                    mahp_d1 = f"{mahp}_D1"
+                    mahp_d2 = f"{mahp}_D2"
+                    
+                    split_courses[mahp] = [(mahp_d1, to_d1), (mahp_d2, to_d2)]
+                    
+                    # Thêm entries mới vào phong_theo_mon
+                    self.phong_theo_mon[mahp_d1] = {"ToThi": to_d1, "PhongThi": info.get("PhongThi", "PH")}
+                    self.phong_theo_mon[mahp_d2] = {"ToThi": to_d2, "PhongThi": info.get("PhongThi", "PH")}
+                    
+                    print(f"   - {mahp}: {to_thi} groups -> Split to {mahp_d1}({to_d1}) + {mahp_d2}({to_d2})")
+            
+            self.split_courses = split_courses
+            
+            # Helper to replace in lists (defined before use)
+            def replace_split_courses(mon_list, split_map):
+                result = []
+                for m in mon_list:
+                    if m in split_map:
+                        for mahp_split, _ in split_map[m]:
+                            result.append(mahp_split)
+                    else:
+                        result.append(m)
+                return result
+            
+            # CRITICAL FIX: Update ctdt_khoa_to_mon and sv_to_mon with split codes
+            # Without this, constraints will never match the split course codes
+            if split_courses:
+                # Update ctdt_khoa_to_mon
+                new_ctdt_khoa_to_mon = {}
+                for key, mon_list in self.ctdt_khoa_to_mon.items():
+                    new_ctdt_khoa_to_mon[key] = replace_split_courses(mon_list, split_courses)
+                self.ctdt_khoa_to_mon = new_ctdt_khoa_to_mon
+                
+                # Update sv_to_mon
+                new_sv_to_mon = {}
+                for masv, mon_list in self.sv_to_mon.items():
+                    new_sv_to_mon[masv] = replace_split_courses(mon_list, split_courses)
+                self.sv_to_mon = new_sv_to_mon
+                
+                print(f"   Updated constraints with {len(split_courses)} split courses")
+
             # 1. Phân loại môn
             mon_count = defaultdict(int)
             for mon_list in self.ctdt_khoa_to_mon.values():
@@ -470,8 +611,15 @@ class ExamScheduler:
                             ds_mon_phase2_all.append(m)
             
             ds_mon_phase2 = sorted(list(set(ds_mon_phase2_all)))
-            
-            print(f"Stats Plan: P1(Chung)={len(ds_mon_phase1)}, P2(UuTien)={len(ds_mon_phase2)} (Max {max_days_phase2} days), Total={len(self.ds_mahp_thi)}")
+            ds_toan_bo_mon = self.ds_mahp_thi.tolist()
+
+            # Apply Slit replacement
+            if split_courses:
+                ds_mon_phase1 = replace_split_courses(ds_mon_phase1, split_courses)
+                ds_mon_phase2 = replace_split_courses(ds_mon_phase2, split_courses)
+                ds_toan_bo_mon = replace_split_courses(ds_toan_bo_mon, split_courses)
+
+            print(f"Stats Plan: P1={len(ds_mon_phase1)}, P2={len(ds_mon_phase2)}, Total={len(ds_toan_bo_mon)}")
             
             # --- PHASE 1: Môn Chung ---
             schedule_phase1 = self._run_solver_phase(
@@ -479,11 +627,13 @@ class ExamScheduler:
                 ds_mon_phase1,
                 fixed_schedule=None,
                 time_limit=self.config.solver_timeout,
-                prioritize_early=True
+                prioritize_early=False,
+                relax_same_day=True,  # CRITICAL: Enable soft constraints to prevent INFEASIBLE
+                distribute_uniformly=True # Load Balancing enabled
             )
             
             if schedule_phase1 is None:
-                return SchedulerResult(status="INFEASIBLE", error="Không xếp được lịch cho môn chung (Phase 1)")
+                return SchedulerResult(status="INFEASIBLE", error="Cannot schedule Phase 1 (Common)")
                 
             # --- PHASE 2: Ưu Tiên ---
             schedule_phase2 = schedule_phase1.copy()
@@ -500,49 +650,91 @@ class ExamScheduler:
                     time_limit=max(60, int(self.config.solver_timeout * 0.5)),
                     restricted_days=restricted_days,
                     prioritize_early=True,
-                    relax_same_day=True  # Cho phép vi phạm để đảm bảo có nghiệm
+                    relax_same_day=True,
+                    distribute_uniformly=False # Phase 2 vẫn ưu tiên sớm trong 5 ngày đầu
                 )
                 
                 if schedule_p2_result:
                     schedule_phase2.update(schedule_p2_result)
                 else:
-                    print("⚠️ Warning: Phase 2 fail to solve fully within restricted days. Will merge to Phase 3.")
+                    print(" [Warning] Phase 2 fail match. Merge to Phase 3.")
             
             # --- PHASE 3: Toàn bộ (Rải đều) ---
             final_schedule_input = schedule_phase2
             
             schedule_final = self._run_solver_phase(
                 "PHASE 3 (Toàn bộ - Rải đều)",
-                self.ds_mahp_thi.tolist(),
+                ds_toan_bo_mon,
                 fixed_schedule=final_schedule_input,
                 time_limit=int(self.config.solver_timeout * 1.5),
-                prioritize_early=False
+                prioritize_early=False,
+                relax_same_day=True, # FIX: Enable soft constraints for final phase
+                distribute_uniformly=True # Load Balancing enabled
             )
             
             if not schedule_final:
-                 return SchedulerResult(status="INFEASIBLE", error="Không xếp được lịch Phase 3 (Toàn bộ)")
+                 return SchedulerResult(status="INFEASIBLE", error="Cannot schedule Phase 3 (Full)")
             
             # --- XỬ LÝ KẾT QUẢ ---
             records = []
             slot_assignments = defaultdict(list)
             
+            # Tạo mapping đảo ngược: MaHP_D1/D2 -> MaHP gốc
+            split_to_original = {}
+            for mahp_goc, split_list in split_courses.items():
+                for mahp_split, _ in split_list:
+                    split_to_original[mahp_split] = mahp_goc
+
             for mahp, (d, c) in schedule_final.items():
                 ngay = self.map_ngay[d]
-                for to in range(1, self.phong_theo_mon[mahp]["ToThi"] + 1):
-                    slot_assignments[(ngay, c)].append((mahp, to))
+                
+                # Convert MaHP_D1/D2 về MaHP gốc
+                mahp_output = split_to_original.get(mahp, mahp)
+                
+                so_to = int(self.phong_theo_mon[mahp]["ToThi"])
+                
+                # Tính offset cho các môn bị chia (D2 phải tiếp nối D1) - FIX BUG STUDENT DISTRIBUTION
+                start_offset = 0
+                if mahp in split_to_original and mahp_output in split_courses:
+                    for m_split, t_split in split_courses[mahp_output]:
+                        if m_split == mahp:
+                            break
+                        start_offset += t_split
+
+                for to in range(1, so_to + 1):
+                    actual_to = to + start_offset
+                    slot_assignments[(ngay, c)].append((mahp_output, mahp, actual_to))
             
             # Gán phòng
             for (ngay, ca), to_list in slot_assignments.items():
-                to_list.sort(key=lambda x: (x[0], x[1]))
-                for idx, (mahp, to) in enumerate(to_list):
-                    phong = self.phong_kha_dung[idx % len(self.phong_kha_dung)]
-                    records.append({
-                        "MaHP": mahp,
-                        "ToThi": to,
-                        "Ngay": ngay,
-                        "Ca": ca,
-                        "PhongThi": phong
-                    })
+                # Tách theo loại phòng (dùng mahp_internal để tra cứu loại phòng)
+                to_list_ph = [(mout, mint, to) for mout, mint, to in to_list if self.phong_theo_mon.get(mint, {}).get("PhongThi", "PH") == "PH"]
+                to_list_pm = [(mout, mint, to) for mout, mint, to in to_list if self.phong_theo_mon.get(mint, {}).get("PhongThi", "PH") == "PM"]
+
+                # Sắp xếp
+                to_list_ph.sort(key=lambda x: (x[0], x[2]))
+                to_list_pm.sort(key=lambda x: (x[0], x[2]))
+
+                # PHONG LISTS
+                PHONG_PH = [p for p in self.phong_kha_dung if p.startswith("PH")]
+                PHONG_PM = [p for p in self.phong_kha_dung if p.startswith("PM")]
+                
+                def assign_rooms(item_list, room_list, fallback_list):
+                    for idx, (mout, mint, to) in enumerate(item_list):
+                        if room_list:
+                            phong = room_list[idx % len(room_list)]
+                        else:
+                            phong = fallback_list[idx % len(fallback_list)]
+                        records.append({
+                            "MaHP": mout,
+                            "ToThi": to,
+                            "Ngay": ngay,
+                            "Ca": ca,
+                            "PhongThi": phong
+                        })
+
+                assign_rooms(to_list_ph, PHONG_PH, self.phong_kha_dung)
+                assign_rooms(to_list_pm, PHONG_PM, self.phong_kha_dung)
             
             # Tạo records_sv
             records_sv = [] 
@@ -551,7 +743,7 @@ class ExamScheduler:
                 status="OPTIMAL",
                 records=records,
                 records_sv=records_sv,
-                stats={"msg": "Xếp lịch thành công 3 Phase"}
+                stats={"msg": "Schedule Success (3 Phases)"}
             )
             
         except Exception as e:
@@ -572,7 +764,11 @@ class ExamScheduler:
                     df_kq.loc[i, "Slot"] = idx
             
             with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-                df_kq.sort_values(["Ngay", "Ca", "Slot", "PhongThi"]).to_excel(
+                # Format date column as dd/mm/yyyy
+                df_kq_export = df_kq.copy()
+                df_kq_export["Ngay"] = pd.to_datetime(df_kq_export["Ngay"]).dt.strftime('%d/%m/%Y')
+                
+                df_kq_export.sort_values(["Ngay", "Ca", "Slot", "PhongThi"]).to_excel(
                     writer,
                     sheet_name="LichThi_ToThi",
                     index=False

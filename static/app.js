@@ -34,9 +34,7 @@ const elements = {
 
 document.addEventListener('DOMContentLoaded', () => {
     initUploadZones();
-    initConfig();
-    loadFileStatus();
-    loadConfig();
+
     loadResults();
     loadResults();
     initEventListeners();
@@ -149,66 +147,7 @@ function checkAllFilesUploaded() {
     elements.btnSolve.disabled = !allUploaded;
 }
 
-// =====================================================
-// CONFIGURATION
-// =====================================================
 
-function initConfig() {
-    // Toggle handlers
-    document.getElementById('cfg-sv-khong-trung').addEventListener('change', saveConfig);
-    document.getElementById('cfg-ctdt-trung-ngay').addEventListener('change', saveConfig);
-    document.getElementById('cfg-ctdt-lien-ngay').addEventListener('change', saveConfig);
-
-    // Number input handlers
-    document.getElementById('cfg-max-to').addEventListener('change', saveConfig);
-    document.getElementById('cfg-penalty').addEventListener('change', saveConfig);
-    document.getElementById('cfg-timeout').addEventListener('change', saveConfig);
-    document.getElementById('cfg-workers').addEventListener('change', saveConfig);
-}
-
-async function loadConfig() {
-    try {
-        const response = await fetch('/api/config');
-        const data = await response.json();
-
-        if (data.success) {
-            state.config = data.config;
-
-            document.getElementById('cfg-sv-khong-trung').checked = data.config.sv_khong_trung_ca;
-            document.getElementById('cfg-ctdt-trung-ngay').checked = data.config.ctdt_khong_trung_ngay ?? true;
-            document.getElementById('cfg-ctdt-lien-ngay').checked = data.config.ctdt_khong_lien_ngay;
-            document.getElementById('cfg-max-to').value = data.config.max_to_per_ca;
-            document.getElementById('cfg-penalty').value = data.config.he_so_penalty_lien_ngay ?? 10;
-            document.getElementById('cfg-timeout').value = data.config.solver_timeout;
-            document.getElementById('cfg-workers').value = data.config.num_workers;
-        }
-    } catch (error) {
-        console.error('Error loading config:', error);
-    }
-}
-
-async function saveConfig() {
-    const config = {
-        sv_khong_trung_ca: document.getElementById('cfg-sv-khong-trung').checked,
-        ctdt_khong_trung_ngay: document.getElementById('cfg-ctdt-trung-ngay').checked,
-        ctdt_khong_lien_ngay: document.getElementById('cfg-ctdt-lien-ngay').checked,
-        max_to_per_ca: parseInt(document.getElementById('cfg-max-to').value),
-        he_so_penalty_lien_ngay: parseInt(document.getElementById('cfg-penalty').value),
-        solver_timeout: parseInt(document.getElementById('cfg-timeout').value),
-        num_workers: parseInt(document.getElementById('cfg-workers').value)
-    };
-
-    try {
-        await fetch('/api/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(config)
-        });
-        state.config = config;
-    } catch (error) {
-        console.error('Error saving config:', error);
-    }
-}
 
 // =====================================================
 // SOLVER
@@ -443,8 +382,48 @@ function formatDate(isoString) {
 // ===================================
 
 let visualState = {
-    selectedSlot: null, // { ngay, ca, phong, item: { ... } }
+    selectedSlots: [], // Array of { ngay, ca, phong, item }
 };
+
+// Helper: Check if a slot is selected
+function isSlotSelected(ngay, ca, phong) {
+    return visualState.selectedSlots.some(s =>
+        s.ngay === ngay && s.ca === ca && s.phong === phong
+    );
+}
+
+// Helper: Toggle slot selection
+function toggleSlotSelection(ngay, ca, phong, item) {
+    const idx = visualState.selectedSlots.findIndex(s =>
+        s.ngay === ngay && s.ca === ca && s.phong === phong
+    );
+    if (idx >= 0) {
+        visualState.selectedSlots.splice(idx, 1);
+    } else if (item) {
+        visualState.selectedSlots.push({ ngay, ca, phong, item });
+    }
+    updateSelectionCount();
+}
+
+// Helper: Clear all selections
+function clearAllSelections() {
+    visualState.selectedSlots = [];
+    updateSelectionCount();
+    renderScheduleGrid();
+}
+
+// Helper: Update selection count display
+function updateSelectionCount() {
+    const countEl = document.getElementById('selection-count');
+    if (countEl) {
+        countEl.textContent = `${visualState.selectedSlots.length} selected`;
+    }
+    // Enable/disable batch move button
+    const btnBatch = document.getElementById('btn-batch-move');
+    if (btnBatch) {
+        btnBatch.disabled = visualState.selectedSlots.length === 0;
+    }
+}
 
 async function loadScheduleData() {
     try {
@@ -474,17 +453,26 @@ function initVisualSchedule(data) {
     const dateSelect = document.getElementById('visual-date-select');
     const currentDate = dateSelect.value;
 
-    dateSelect.innerHTML = '<option value="">-- Chọn ngày --</option>';
+    dateSelect.innerHTML = '<option value="">-- Select Day --</option>';
 
-    // Sort dates properly? Handled by backend (sorted) or do it here
-    const sortedDays = data.days; // Assuming sorted from backend
+    // Populate both view date and target date dropdowns
+    const sortedDays = data.days;
+    const targetDaySelect = document.getElementById('target-day-select');
+    targetDaySelect.innerHTML = '<option value="">-- Select Day --</option>';
 
     sortedDays.forEach(day => {
+        // View day select
         const opt = document.createElement('option');
         opt.value = day;
         opt.textContent = day;
         if (day === currentDate) opt.selected = true;
         dateSelect.appendChild(opt);
+
+        // Target day select
+        const opt2 = document.createElement('option');
+        opt2.value = day;
+        opt2.textContent = day;
+        targetDaySelect.appendChild(opt2);
     });
 
     // Event Listeners (ensure only added once)
@@ -505,9 +493,19 @@ function renderScheduleGrid() {
     const container = document.getElementById('schedule-grid');
 
     if (!date) {
-        container.innerHTML = '<p class="text-center text-muted">Vui lòng chọn ngày để xem lịch.</p>';
+        container.innerHTML = '<p class="text-center text-muted">Please select a date to view schedule.</p>';
         return;
     }
+
+    // PRESERVE SCROLL POSITIONS before re-rendering
+    const wrapper = document.querySelector('.schedule-grid-wrapper');
+    const wrapperScrollLeft = wrapper ? wrapper.scrollLeft : 0;
+
+    // Save scroll positions of each shift body
+    const shiftScrollTops = [];
+    document.querySelectorAll('.shift-body').forEach((el, idx) => {
+        shiftScrollTops[idx] = el.scrollTop;
+    });
 
     const { rooms, shifts, schedule } = state.scheduleData;
 
@@ -528,28 +526,25 @@ function renderScheduleGrid() {
             // Find item in this slot
             const item = itemsOnDate.find(i => i.Ca == shift && i.PhongThi == room);
             const isOccupied = !!item;
-            const isSelected = visualState.selectedSlot &&
-                visualState.selectedSlot.ngay === date &&
-                visualState.selectedSlot.ca === shift &&
-                visualState.selectedSlot.phong === room;
+            const isSelected = isSlotSelected(date, shift, room);
 
-            const bgClass = isSelected ? 'selected' : (isOccupied ? 'occupied' : 'empty');
-            const bgColor = isSelected ? '#fff3cd' : (isOccupied ? '#e3f2fd' : '#f5f5f5');
-            const borderColor = isSelected ? '#ffc107' : (isOccupied ? '#2196f3' : '#ddd');
+            const bgColor = isSelected ? '#c8e6c9' : (isOccupied ? '#e3f2fd' : '#f5f5f5');
+            const borderColor = isSelected ? '#4caf50' : (isOccupied ? '#2196f3' : '#ddd');
 
             // Escape params for onclick
             const safeDate = date.replace(/'/g, "\\'");
             const safeRoom = room.replace(/'/g, "\\'");
 
-            html += `<div class="room-slot ${bgClass}" 
+            html += `<div class="room-slot" 
                           onclick="handleSlotClick('${safeDate}', ${shift}, '${safeRoom}')"
-                          style="background:${bgColor}; border:1px solid ${borderColor}; padding:8px; margin-bottom:5px; cursor:pointer; border-radius:3px; position:relative; min-height:50px; transition: all 0.2s;">
+                          style="background:${bgColor}; border:2px solid ${borderColor}; padding:8px; margin-bottom:5px; cursor:pointer; border-radius:3px; position:relative; min-height:50px; transition: all 0.2s;">
                         <div class="room-name" style="font-weight:bold; font-size:0.85em; color:#666; margin-bottom:4px;">${room}</div>
                         ${isOccupied ? `
                             <div class="slot-content">
                                 <div style="color:#0d47a1; font-weight:bold;">${item.MaHP}</div>
-                                <div style="font-size:0.8em;">Tổ: ${item.ToThi}</div>
+                                <div style="font-size:0.8em;">To: ${item.ToThi}</div>
                             </div>
+                            ${isSelected ? '<span style="position:absolute;top:5px;right:5px;color:#4caf50;font-size:1.2em;">&#10003;</span>' : ''}
                         ` : ''}
                      </div>`;
         });
@@ -560,70 +555,140 @@ function renderScheduleGrid() {
 
     html += '</div>';
     container.innerHTML = html;
+
+    // RESTORE SCROLL POSITIONS after rendering
+    if (wrapper) {
+        wrapper.scrollLeft = wrapperScrollLeft;
+    }
+    document.querySelectorAll('.shift-body').forEach((el, idx) => {
+        if (shiftScrollTops[idx] !== undefined) {
+            el.scrollTop = shiftScrollTops[idx];
+        }
+    });
 }
 
-window.handleSlotClick = async function (ngay, ca, phong) {
+window.handleSlotClick = function (ngay, ca, phong) {
     const { schedule } = state.scheduleData;
     const item = schedule.find(i => i.Ngay === ngay && i.Ca == ca && i.PhongThi === phong);
 
-    // Action Logic
-    if (!visualState.selectedSlot) {
-        // Selection Mode - Only select if occupied
-        if (item) {
-            visualState.selectedSlot = { ngay, ca, phong, item };
-            renderScheduleGrid(); // Re-render to show selection
-        }
-    } else {
-        // Target Mode
-        const source = visualState.selectedSlot;
-
-        // Click same slot -> Deselect
-        if (source.ngay === ngay && source.ca === ca && source.phong === phong) {
-            visualState.selectedSlot = null;
-            renderScheduleGrid();
-            return;
-        }
-
-        // Perform Action (Move or Swap)
-        const isSwap = !!item;
-
-        const confirmMsg = isSwap ?
-            `Bạn có muốn ĐỔI LỊCH giữa [${source.item.MaHP}-T${source.item.ToThi}] và [${item.MaHP}-T${item.ToThi}]?` :
-            `Bạn có muốn CHUYỂN [${source.item.MaHP}-T${source.item.ToThi}] sang phòng ${phong} (Ca ${ca})?`;
-
-        if (confirm(confirmMsg)) {
-            // Call API
-            const payload = {
-                action: isSwap ? 'swap' : 'move',
-                source: visualState.selectedSlot.item,
-                target: { Ngay: ngay, Ca: ca, PhongThi: phong }
-            };
-
-            try {
-                const res = await fetch('/api/schedule/update', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                const resData = await res.json();
-
-                if (resData.success) {
-                    alert(resData.message);
-                    visualState.selectedSlot = null;
-                    await loadScheduleData(); // Reload data
-                    // renderScheduleGrid will be called by initVisualSchedule if date matches
-                } else {
-                    alert('Lỗi: ' + resData.error);
-                }
-            } catch (e) {
-                alert('Lỗi kết nối: ' + e);
-            }
-        } else {
-            // If clicked on another slot but user cancelled or just wanted to change selection?
-            // Simplify: always deselect if action cancelled
-            visualState.selectedSlot = null;
-            renderScheduleGrid();
-        }
+    // Only allow selecting occupied slots
+    if (item) {
+        toggleSlotSelection(ngay, ca, phong, item);
+        renderScheduleGrid();
     }
 };
+
+// Batch move selected items to target day/shift
+window.batchMoveSelected = async function (forceMove = false) {
+    if (visualState.selectedSlots.length === 0) {
+        alert('Please select at least one exam group first.');
+        return;
+    }
+
+    const targetDay = document.getElementById('target-day-select').value;
+    const targetShift = document.getElementById('target-shift-select').value;
+
+    if (!targetDay || !targetShift) {
+        alert('Please select target day and shift.');
+        return;
+    }
+
+    const items = visualState.selectedSlots.map(s => ({
+        MaHP: s.item.MaHP,
+        ToThi: s.item.ToThi
+    }));
+
+    if (!forceMove) {
+        const confirmMsg = `Move ${items.length} exam group(s) to ${targetDay} - Ca ${targetShift}?`;
+        if (!confirm(confirmMsg)) return;
+    }
+
+    try {
+        const res = await fetch('/api/schedule/batch-update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                items: items,
+                target: { Ngay: targetDay, Ca: parseInt(targetShift) },
+                force_move: forceMove
+            })
+        });
+
+        const resData = await res.json();
+
+        if (resData.success) {
+            alert(resData.message);
+            clearAllSelections();
+            await loadScheduleData();
+        } else {
+            // Handle different error types
+            if (resData.error_type === 'CONFLICT_SHIFT') {
+                // HARD BLOCK - cannot proceed
+                let detailsStr = '';
+                if (resData.conflict_details) {
+                    detailsStr = resData.conflict_details.map(c =>
+                        `SV: ${c.MaSV} | Moving: ${c.moving_MaHP} T${c.moving_ToThi} -> Conflict: ${c.conflict_MaHP} T${c.conflict_ToThi}`
+                    ).join('\n');
+                }
+                alert(`BLOCKED: ${resData.error}\n\nConflict Details:\n${detailsStr}\n\nYou cannot move these exams to the same shift.`);
+            } else if (resData.error_type === 'WARNING_SAME_DAY' && resData.can_force) {
+                // SOFT WARNING - can proceed with confirmation
+                let detailsStr = '';
+                if (resData.conflict_details) {
+                    detailsStr = resData.conflict_details.map(c =>
+                        `SV: ${c.MaSV} | Moving: ${c.moving_MaHP} T${c.moving_ToThi} -> Same-day: ${c.conflict_MaHP} T${c.conflict_ToThi} Ca${c.conflict_Ca}`
+                    ).join('\n');
+                }
+                const proceed = confirm(`WARNING: ${resData.error}\n\nConflict Details:\n${detailsStr}\n\nDo you want to proceed anyway?`);
+                if (proceed) {
+                    await batchMoveSelected(true);
+                }
+            } else {
+                alert('Error: ' + resData.error);
+            }
+        }
+    } catch (e) {
+        alert('Connection error: ' + e);
+    }
+};
+
+// Expose clearAllSelections globally
+window.clearAllSelections = clearAllSelections;
+
+// =====================================================
+// EXPORT STUDENTS
+// =====================================================
+async function exportStudents() {
+    try {
+        const btn = document.querySelector('[onclick="exportStudents()"]');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '⏳ Đang xuất...';
+        }
+
+        const res = await fetch('/api/export-students', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+            alert(`✅ ${data.message}\n\nFile: ${data.filename}`);
+            // Trigger download
+            window.location.href = `/download/${data.filename}`;
+        } else {
+            alert('❌ Lỗi: ' + data.error);
+        }
+    } catch (e) {
+        alert('❌ Connection error: ' + e);
+    } finally {
+        const btn = document.querySelector('[onclick="exportStudents()"]');
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '📥 Xuất DS Sinh Viên';
+        }
+    }
+}
+
+window.exportStudents = exportStudents;
